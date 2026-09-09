@@ -1,0 +1,244 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@600&display=swap');
+
+:root {
+  --bg: #0f0e0d;
+  --card: #1d2021;
+  --card-2: #24282a;
+  --text: #fbf1c7;
+  --muted: #bdae93;
+  --border: #2f3335;
+  --green: #c9dd4c;
+  --yellow: #ffcc47;
+  --red: #ff6b58;
+  --accent: #9fc2b4;
+  --dot-off: #4a4f52;
+}
+* { box-sizing: border-box; }
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--dot-off) var(--bg);
+}
+*::-webkit-scrollbar { width: 7px; height: 7px; }
+*::-webkit-scrollbar-track { background: var(--bg); }
+*::-webkit-scrollbar-thumb {
+  background: var(--dot-off);
+  border: 1px solid var(--bg);
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  padding: 12px 14px;
+  /* The dashboard lives in a fixed window band: it fits the viewport or it
+     shrinks the chart, but it never scrolls. */
+  display: flex; flex-direction: column; gap: 10px;
+  overflow: hidden;
+}
+@media (max-width: 600px) {
+  body { padding: 10px; }
+  #grid { gap: 8px; }
+}
+main {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column; gap: 10px;
+}
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  flex: 0 0 auto; flex-wrap: wrap; gap: 12px;
+}
+h1 { font-size: 17px; margin: 0; font-weight: 600; }
+.meta { display: flex; align-items: center; gap: 12px; color: var(--muted); }
+#refresh, #settings-btn {
+  background: var(--card-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 12px; cursor: pointer; font-size: 13px;
+}
+#refresh:hover, #settings-btn:hover { border-color: var(--accent); }
+#settings-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, .55);
+  display: flex; justify-content: flex-end; z-index: 10;
+}
+#settings-overlay[hidden] { display: none; }
+#settings-panel {
+  width: 340px; max-width: 92vw; height: 100%; overflow-y: auto;
+  background: var(--card); border-left: 1px solid var(--border);
+  padding: 18px;
+}
+.settings-head {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px;
+}
+.settings-head h2 { font-size: 16px; margin: 0; font-weight: 600; }
+#settings-close {
+  background: none; color: var(--muted); border: none; cursor: pointer;
+  font-size: 22px; line-height: 1; padding: 2px 6px;
+}
+#settings-close:hover { color: var(--text); }
+.set-card { margin-bottom: 18px; }
+.set-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding-bottom: 6px; border-bottom: 1px solid var(--border); margin-bottom: 6px;
+}
+.set-actions { display: flex; gap: 10px; }
+.link-btn {
+  background: none; border: none; color: var(--accent); cursor: pointer;
+  font-size: 12px; padding: 0;
+}
+.link-btn:hover { text-decoration: underline; }
+.set-row {
+  display: flex; align-items: center; gap: 8px; padding: 5px 2px;
+  cursor: pointer; border-radius: 6px; font-size: 13px;
+}
+.set-row:hover { background: var(--card-2); }
+.set-row input[type="checkbox"] { accent-color: var(--green); width: 15px; height: 15px; cursor: pointer; }
+.set-row input[type="radio"] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+.set-pick { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; cursor: pointer; }
+.set-primary { display: flex; align-items: center; justify-content: center; flex: 0 0 42px; cursor: pointer; }
+.set-col-label { color: var(--muted); font-size: 11px; width: 42px; text-align: center; }
+.set-label { flex: 1; }
+.hint { color: var(--muted); font-size: 11px; }
+.set-empty { color: var(--muted); font-size: 12px; }
+.set-sep { border-top: 1px solid var(--border); margin: 8px 0 4px; }
+.all-hidden { color: var(--muted); font-size: 12px; text-align: center; }
+#grid {
+  display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  justify-content: center;
+  flex: 0 0 auto; align-items: stretch;
+}
+/* The chart takes every pixel the cards leave behind, at any window height. */
+#usage-chart {
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+  width: 100%; padding: 12px 14px; margin: 0;
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column;
+}
+.chart-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.chart-head h2 { font-size: 14px; margin: 0; }
+.chart-head p { color: var(--muted); font-size: 11px; margin: 2px 0 0; }
+.live-mark { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; display: flex; align-items: center; gap: 6px; }
+.live-mark i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px color-mix(in srgb, var(--green) 70%, transparent); }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 5px 14px; margin: 10px 0 6px; flex: 0 0 auto; }
+.series-toggle { display: flex; align-items: center; gap: 6px; color: var(--muted); cursor: pointer; font-size: 11px; }
+.series-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.series-toggle i { width: 16px; height: 3px; border-radius: 2px; background: var(--dot-off); }
+.series-toggle:has(input:checked) { color: var(--text); }
+.series-toggle:has(input:checked) i { background: var(--series); box-shadow: 0 0 6px color-mix(in srgb, var(--series) 55%, transparent); }
+.series-toggle:focus-within { outline: 1px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+.chart-plot { flex: 1 1 auto; min-height: 0; }
+.chart-plot svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.chart-grid line { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.chart-grid text { fill: var(--muted); font: 12px Inter, sans-serif; }
+.usage-line { fill: none; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.chart-empty { color: var(--muted); height: 100%; margin: 0; display: grid; place-items: center; font-size: 12px; }
+@media (max-width: 600px) {
+  #usage-chart { padding: 10px; }
+  .chart-legend { margin-left: 4px; }
+}
+.card {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 12px; padding: 12px 14px;
+  display: flex; flex-direction: column;
+}
+.card h2 {
+  margin: 0 0 2px; font-size: 15px; display: flex; align-items: center; gap: 8px;
+}
+.card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.card-head h2 { margin: 0; }
+.logout-btn {
+  background: none; border: 1px solid var(--border); color: var(--muted);
+  border-radius: 6px; padding: 1px 7px; cursor: pointer; font-size: 10px;
+}
+.logout-btn:hover { color: var(--red); border-color: var(--red); }
+.logout-btn:disabled { opacity: .5; cursor: default; }
+.plan { color: var(--muted); font-size: 11px; margin-bottom: 8px; text-transform: capitalize; }
+.plan-inline {
+  color: var(--muted); font-size: 11px; font-weight: 400;
+  text-transform: capitalize; margin-left: 7px;
+}
+/* The gauge owns the full card width; nothing competes with it horizontally. */
+.gauge-wrap { width: min(100%, 220px); margin: 0 auto; }
+/* A card with no secondary bars centres a slightly larger dot grid instead of
+   hugging the left edge with a dead right half. */
+.dots-wrap { position: relative; width: 100%; margin: 0 auto; container-type: inline-size; }
+.dots { display: block; width: 100%; height: auto; }
+.dots .dot { fill: var(--dot-off); opacity: .55; }
+.dots .dot.on {
+  fill: #ffffff;
+  opacity: .45;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.dots-wrap.stagger .dot.on { opacity: 0; animation: dot-in 240ms cubic-bezier(.2, .7, .3, 1.2) forwards; }
+@keyframes dot-in {
+  from { opacity: 0; transform: scale(0); }
+  to { opacity: .45; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dots-wrap.stagger .dot.on { animation: none; opacity: .45; }
+}
+.dots-pct {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  -webkit-text-stroke: 8px rgba(0, 0, 0, .8);
+  paint-order: stroke fill;
+  font-family: "Styrene B", Archivo, Inter, -apple-system, sans-serif;
+  font-size: 56cqw; font-weight: 600; letter-spacing: -0.05em;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .9), 0 0 14px rgba(0, 0, 0, .65);
+}
+.dots-pct.widest { font-size: 42cqw; }
+.dots-pct.over { color: var(--red); }
+.gauge-meta {
+  text-align: center; font-size: 11px; color: var(--text); margin-top: 4px;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+/* The separator lives in CSS because updateCountdowns() rewrites the sibling
+   span's textContent every tick. */
+.gauge-meta b { color: var(--muted); font-weight: 400; }
+.gauge-meta b::after { content: "·"; margin: 0 6px; }
+.minibars { margin-top: 9px; display: flex; flex-direction: column; gap: 5px; }
+.minibar {
+  display: grid;
+  /* Fixed side columns keep every track the same length, both within a card and
+     across cards; auto columns let label and countdown text eat into the bar. */
+  grid-template-columns: 40px 1fr 34px 74px;
+  align-items: center; gap: 8px; font-size: 11px;
+}
+.mb-cap { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mb-track { height: 12px; border-radius: 2px; background: var(--dot-off); overflow: hidden; }
+.mb-fill { display: block; height: 100%; border-radius: 2px; }
+.mb-pct { color: var(--text); font-variant-numeric: tabular-nums; text-align: right; }
+.mb-pct.over { color: var(--red); }
+.mb-reset { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+/* An unarmed window: legible, but plainly not a running countdown. */
+.na { color: var(--muted); opacity: .72; }
+.extras { border-top: 1px solid var(--border); margin-top: 7px; padding-top: 7px; }
+.extra { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-bottom: 2px; }
+.error { color: var(--red); font-size: 13px; }
+.connect { text-align: center; }
+.connect code {
+  background: var(--card-2); padding: 4px 10px; border-radius: 6px;
+  font-size: 18px; letter-spacing: 2px; color: var(--accent); display: inline-block; margin: 8px 0;
+}
+.connect a { color: var(--accent); }
+.paste-row {
+  display: flex; gap: 8px; justify-content: center; margin-top: 8px;
+}
+.paste-row input {
+  flex: 1; max-width: 220px;
+  background: var(--card-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+  font-size: 13px;
+}
+.paste-row input:focus { outline: none; border-color: var(--accent); }
+.btn {
+  background: var(--accent); color: var(--bg); border: none; border-radius: 8px;
+  padding: 8px 16px; cursor: pointer; font-weight: 600; font-size: 13px;
+}
+.btn.ghost { background: var(--card-2); color: var(--text); border: 1px solid var(--border); }
+.spinner { color: var(--muted); font-size: 13px; }
+footer { display: none; }

@@ -1,0 +1,781 @@
+const REFRESH_MS = 60000;
+const grid = document.getElementById("grid");
+const updatedEl = document.getElementById("updated");
+const settingsOverlay = document.getElementById("settings-overlay");
+const settingsBody = document.getElementById("settings-body");
+const chartLegend = document.getElementById("chart-legend");
+const chartPlot = document.getElementById("chart-plot");
+let pendingPoll = null;
+let lastData = null;
+
+const PREFS_KEY = "usage-dashboard-metric-prefs";
+const CHART_PREFS_KEY = "usage-dashboard-chart-prefs";
+const PRIMARY_PREFS_KEY = "usage-dashboard-primary-prefs";
+const LIVE_HISTORY_KEY = "usage-dashboard-live-history";
+let prefs = loadPrefs();
+let chartPrefs = loadChartPrefs();
+let primaryPrefs = loadPrimaryPrefs();
+let firstRender = true;
+
+function loadPrefs() {
+  try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch { return {}; }
+}
+function savePrefs() {
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch {}
+}
+function loadChartPrefs() {
+  try { return JSON.parse(localStorage.getItem(CHART_PREFS_KEY)) || {}; } catch { return {}; }
+}
+function saveChartPrefs() {
+  try { localStorage.setItem(CHART_PREFS_KEY, JSON.stringify(chartPrefs)); } catch {}
+}
+function loadPrimaryPrefs() {
+  try { return JSON.parse(localStorage.getItem(PRIMARY_PREFS_KEY)) || {}; } catch { return {}; }
+}
+function savePrimaryPrefs() {
+  try { localStorage.setItem(PRIMARY_PREFS_KEY, JSON.stringify(primaryPrefs)); } catch {}
+}
+const winId = (w) => String(w.key || w.label || "");
+const extraId = (x) => "extra:" + (x.label || "");
+function isEnabled(provider, id) {
+  return ((prefs[provider] || {})[id]) !== false;
+}
+function setEnabled(provider, id, on) {
+  const p = prefs[provider] || (prefs[provider] = {});
+  if (on) delete p[id]; else p[id] = false;
+  if (!Object.keys(p).length) delete prefs[provider];
+  savePrefs();
+}
+
+// Which window a provider's card shows as the big dot gauge; every other
+// enabled window drops to a mini bar. Unset means "whatever pickPrimaryWindow
+// picks", so a provider the user never touched keeps the 5h-then-7d default.
+function setPrimaryMetric(provider, id) {
+  if (id) primaryPrefs[provider] = id; else delete primaryPrefs[provider];
+  savePrimaryPrefs();
+}
+
+const DOTS = 64;
+const DOT_COLS = 8;
+const STAGGER_MS = 11;
+const PROVIDER_COLORS = {
+  GLM: "#783afd",
+  Codex: "#bffd3a",
+  Grok: "#3afdda",
+  Claude: "#fd3a5e",
+};
+const providerColor = (name) => PROVIDER_COLORS[name] || "var(--accent)";
+
+function windowDurationMs(w) {
+  const k = String(w.key || w.label || "").toLowerCase();
+  if (k.startsWith("5h")) return 5 * 3600e3;
+  if (k.startsWith("1h")) return 3600e3;
+  if (k.startsWith("7d")) return 7 * 86400e3;
+  if (k.startsWith("1d") || k.startsWith("day")) return 86400e3;
+  if (k.startsWith("month") || k.startsWith("1mo")) {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate() * 86400e3;
+  }
+  return null;
+}
+// How full the dot grid is: the share of the window's duration already elapsed,
+// rounded so a freshly armed window is empty and reset-imminent is full.
+// 0 = unarmed / full duration remaining (all gray); null = duration unknown,
+// fall back to usage.
+function gridFillPct(w, now) {
+  if (!w.resetAt) return 0;
+  const dur = windowDurationMs(w);
+  if (!dur) return null;
+  return Math.max(0, Math.min(100, Math.round(100 - ((w.resetAt - now) / dur) * 100)));
+}
+function dotGridHtml(pct, caption, color, stagger, fillPct) {
+  const raw = Math.max(0, pct || 0);
+  const fill = fillPct == null ? raw : fillPct;
+  const lit = Math.ceil((Math.min(100, Math.max(0, fill)) * DOTS) / 100);
+  const shown = Math.round(raw);
+  const over = raw > 100;
+  const digits = String(shown).length;
+  const sizeClass = digits >= 4 ? " widest" : "";
+  let dots = "";
+  for (let i = 0; i < DOTS; i++) {
+    const cx = 13.75 + (i % DOT_COLS) * 27.5;
+    const cy = 13.75 + Math.floor(i / DOT_COLS) * 27.5;
+    const on = i < lit;
+    const delay = stagger && on ? ` style="animation-delay:${i * STAGGER_MS}ms"` : "";
+    dots += `<circle class="dot${on ? " on" : ""}" cx="${cx}" cy="${cy}" r="9.2"${delay}/>`;
+  }
+  return `<div class="dots-wrap${stagger ? " stagger" : ""}" style="color:${color}">
+    <svg class="dots" viewBox="0 0 220 220" role="img" aria-label="${caption} ${shown}% used">
+      ${dots}
+    </svg>
+    <div class="dots-pct${over ? " over" : ""}${sizeClass}">${shown}</div>
+  </div>`;
+}
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const SECONDS_BELOW_MS = 10 * 60e3;
+function remaining(resetAt) {
+  const left = Math.max(0, resetAt - Date.now());
+  let s = Math.floor(left / 1000);
+  const d = Math.floor(s / 86400); s -= d * 86400;
+  const h = Math.floor(s / 3600); s -= h * 3600;
+  const m = Math.floor(s / 60); s -= m * 60;
+  const parts = [];
+  if (d) parts.push(d + "d");
+  if (h || d) parts.push(h + "h");
+  parts.push(m + "m");
+  if (left < SECONDS_BELOW_MS) parts.push(s + "s");
+  return parts.join(" ");
+}
+// Countdowns render bare next to their window caption ("5h · 3h 15m"); the
+// caption and column position carry the meaning a "resets in" prefix would.
+// No resetAt means the window has not started counting down — the same
+// "unarmed" state gridFillPct reads as an empty grid — so say that rather
+// than render a bare dash that reads as missing data.
+const UNARMED_TEXT = "unarmed";
+const UNARMED_TITLE = "No reset scheduled — this window starts counting at its first use";
+function shortCountdown(resetAt) {
+  return resetAt ? remaining(resetAt) : UNARMED_TEXT;
+}
+function countdownHtml(resetAt, className = "") {
+  const cls = [className, resetAt ? "" : "na"].filter(Boolean).join(" ");
+  const title = resetAt ? "" : ` title="${esc(UNARMED_TITLE)}"`;
+  return `<span${cls ? ` class="${cls}"` : ""} data-reset="${esc(resetAt || "")}"${title}>${shortCountdown(resetAt)}</span>`;
+}
+function updateCountdowns() {
+  document.querySelectorAll("[data-reset]").forEach((el) => {
+    const v = el.getAttribute("data-reset");
+    const resetAt = v ? Number(v) : null;
+    el.textContent = shortCountdown(resetAt);
+    if (el.classList) el.classList.toggle("na", !resetAt);
+  });
+}
+
+// Duration windows caption by their key ("5h", "7d"). A named limit — an
+// extra per-model cap such as "GPT-5.3-Codex-Spark" — has a name where the
+// key would be, and slicing that to six characters yields "gpt-5.", so caption
+// it by the trailing segment that actually distinguishes it ("Spark"). The
+// full name stays in the title attribute.
+const DURATION_KEY = /^(\d+(h|d|mo|y)|month|day|week)/;
+function captionFor(w) {
+  const k = String(w.key || w.label || "").toLowerCase();
+  if (k.startsWith("month")) return "mo";
+  if (DURATION_KEY.test(k)) return k.slice(0, 6);
+  // The key is the limit's name here; the label may have been overwritten with
+  // a duration ("7-Day") when the API reported one, so read the key first.
+  const name = String(w.key || w.label || "");
+  return name.split(/[-\u2013 ]/).filter(Boolean).pop() || k.slice(0, 6);
+}
+// What the caption abbreviates, for a tooltip: the parts of a window's
+// identity the six-character caption had to drop, or "" when it dropped none.
+function captionTitle(w) {
+  const key = String(w.key || "");
+  const label = String(w.label || "");
+  const parts = [];
+  if (key && !DURATION_KEY.test(key.toLowerCase())) parts.push(key);
+  if (label && label !== key) parts.push(label);
+  const full = parts.join(" \u00b7 ");
+  return full.toLowerCase() === captionFor(w).toLowerCase() ? "" : full;
+}
+function pickPrimaryWindow(wins, provider) {
+  if (!wins.length) return null;
+  // A chosen window that is hidden or gone from the payload falls through to
+  // the default rather than leaving the card without a gauge.
+  const chosen = provider && primaryPrefs[provider];
+  if (chosen) {
+    const match = wins.find((w) => winId(w) === chosen);
+    if (match) return match;
+  }
+  const id = (w) => String(w.key || w.label || "").toLowerCase();
+  return wins.find((w) => id(w).startsWith("5h")) || wins.find((w) => id(w).startsWith("7d")) || wins[0];
+}
+function miniBarHtml(w, color) {
+  const raw = Math.max(0, w.usedPct || 0);
+  const clamped = Math.min(100, raw);
+  const title = captionTitle(w);
+  return `<div class="minibar">
+    <span class="mb-cap"${title ? ` title="${esc(title)}"` : ""}>${esc(captionFor(w))}</span>
+    <span class="mb-track"><i class="mb-fill" style="width:${Math.round(clamped)}%;background:${color}"></i></span>
+    <span class="mb-pct${raw > 100 ? " over" : ""}">${Math.round(raw)}%</span>
+    ${countdownHtml(w.resetAt, "mb-reset")}
+  </div>`;
+}
+function gaugeHtml(w, color, stagger, now = Date.now()) {
+  const caption = esc(captionFor(w));
+  const title = captionTitle(w);
+  return `<div class="gauge-wrap">${dotGridHtml(w.usedPct || 0, caption, color, stagger, gridFillPct(w, now))}</div>
+    <div class="gauge-meta"><b${title ? ` title="${esc(title)}"` : ""}>${caption}</b>${countdownHtml(w.resetAt)}</div>`;
+}
+function extrasHtml(extras) {
+  if (!extras || !extras.length) return "";
+  return `<div class="extras">${extras.map((e) => `<div class="extra"><span>${esc(e.label)}</span><span>${esc(e.text)}</span></div>`).join("")}</div>`;
+}
+function oauthSlug(p) {
+  return (p.auth && p.auth.slug) || p.name.toLowerCase();
+}
+function oauthConnectHtml(p) {
+  if (p.connected) return "";
+  const slug = oauthSlug(p);
+  const a = p.auth && p.auth.pending;
+  if (a && (a.verification_url || a.error)) {
+    const err = a.error ? `<p class="error">${esc(a.error)}</p>` : "";
+    const retry = a.error ? `<button class="btn" data-connect="${esc(slug)}">Retry</button>` : `<p class="spinner">Waiting for approval…</p>`;
+    const url = typeof a.verification_url === "string" && a.verification_url.startsWith("https://") ? a.verification_url : "";
+    const urlHtml = url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a>` : "";
+    const code = a.user_code ? `<p>and enter code</p><code>${esc(a.user_code)}</code>` : "";
+    const manualUrl = typeof a.manual_url === "string" && a.manual_url.startsWith("https://") ? a.manual_url : "";
+    const manual = manualUrl ? `
+      <p class="hint">Redirect not working? <a href="${esc(manualUrl)}" target="_blank" rel="noopener">authorize manually</a>, then paste the code:</p>
+      <div class="paste-row">
+        <input type="text" placeholder="Paste code" autocomplete="off" spellcheck="false" data-paste-input="${esc(slug)}" />
+        <button class="btn ghost" data-paste="${esc(slug)}">Submit</button>
+      </div>` : "";
+    return `<div class="connect">
+      ${urlHtml ? `<p>Open ${urlHtml}</p>` : ""}
+      ${code}
+      ${err}
+      ${retry}
+      ${manual}
+    </div>`;
+  }
+  const reason = p.error && p.error !== "not connected"
+    ? `<p class="error">${esc(p.error)}</p>`
+    : "";
+  return `<div class="connect">
+    <p class="spinner">${esc(p.name)} uses OAuth. Connect once to start tracking.</p>
+    ${reason}
+    <button class="btn" data-connect="${esc(slug)}">Connect ${esc(p.name)}</button>
+  </div>`;
+}
+function logoutSlug(p) {
+  if (!p.canLogout) return null;
+  return (p.auth && p.auth.slug) || p.name.toLowerCase();
+}
+function providerErrorText(p) {
+  const wait = Number(p.retryAfterMs);
+  if (Number.isFinite(wait) && wait > 0) {
+    const minutes = Math.max(1, Math.ceil(wait / 60000));
+    return `${p.error} — Anthropic requested a ${minutes}-minute wait; Refresh will not bypass it.`;
+  }
+  if (/^HTTP (429|5\d\d)\b|rate limit|network|fetch failed/i.test(p.error || "")) {
+    return `${p.error} — retrying with backoff.`;
+  }
+  return p.error;
+}
+function cardHtml(p, stagger, now = Date.now()) {
+  let body;
+  if (!p.connected && p.auth) {
+    body = oauthConnectHtml(p);
+  } else if (p.error && !p.connected) {
+    body = `<p class="error">${esc(p.error)}</p>`;
+  } else {
+    const color = providerColor(p.name);
+    const wins = (p.windows || []).filter((w) => isEnabled(p.name, winId(w)));
+    const extras = (p.extras || []).filter((x) => isEnabled(p.name, extraId(x)));
+    const hasMetrics = (p.windows || []).length + (p.extras || []).length > 0;
+    if (hasMetrics && !wins.length && !extras.length) return "";
+    const primary = pickPrimaryWindow(wins, p.name);
+    const rest = primary ? wins.filter((w) => w !== primary) : [];
+    const restHtml = rest.length
+      ? `<div class="minibars">${rest.map((w) => miniBarHtml(w, color)).join("")}</div>`
+      : "";
+    body = (primary ? gaugeHtml(primary, color, stagger, now) : "") + restHtml + extrasHtml(extras);
+    if (!wins.length && !extras.length) {
+      // A connected card with no data and an error (e.g. usage endpoint
+      // 429ing before any good data was cached) must not render blank.
+      body += p.error
+        ? `<p class="error">${esc(providerErrorText(p))}</p>`
+        : `<p class="all-hidden">All metrics hidden — enable some in ⚙ Metrics.</p>`;
+    }
+  }
+  const slug = p.connected ? logoutSlug(p) : null;
+  const logoutBtn = slug
+    ? `<button class="logout-btn" data-logout="${esc(slug)}" data-name="${esc(p.name)}" title="Forget this dashboard's stored credentials">Log out</button>`
+    : "";
+  return `<section class="card">
+    <div class="card-head">
+      <h2>${esc(p.name)}${p.plan ? `<span class="plan-inline">${esc(p.plan)}</span>` : ""}${p.connected ? "" : '<span class="plan-inline">· not connected</span>'}</h2>
+      ${logoutBtn}
+    </div>
+    ${body}
+  </section>`;
+}
+function renderGrid() {
+  if (!lastData) return;
+  const stagger = firstRender;
+  firstRender = false;
+  // The pending-auth poll re-renders periodically; keep typed paste codes.
+  const pasted = {};
+  document.querySelectorAll("[data-paste-input]").forEach((el) => { pasted[el.dataset.pasteInput] = el.value; });
+  grid.innerHTML = lastData.providers.map((p) => cardHtml(p, stagger)).join("");
+  document.querySelectorAll("[data-paste-input]").forEach((el) => {
+    if (pasted[el.dataset.pasteInput]) el.value = pasted[el.dataset.pasteInput];
+  });
+}
+
+// ---------- history chart ----------
+const CHART_HOURS = 24;
+const CHART_MS = CHART_HOURS * 3600e3;
+// The dashboard only samples while it is running, so history has holes. A few
+// missed refreshes still read as one line; a longer silence is drawn as a break
+// rather than a stroke implying usage we never observed.
+const CHART_GAP_MS = 5 * REFRESH_MS;
+async function migrateClientHistory() {
+  let samples;
+  try { samples = JSON.parse(localStorage.getItem(LIVE_HISTORY_KEY)); } catch { return; }
+  if (!Array.isArray(samples) || !samples.length) return;
+  try {
+    const response = await fetch("/api/history/import", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ samples }),
+    });
+    if (response.ok) localStorage.removeItem(LIVE_HISTORY_KEY);
+  } catch {}
+}
+const seriesId = (provider, window) => `${provider}:${String(window.key || window.label || "")}`;
+const isFiveHour = (window) => String(window.key || window.label || "").toLowerCase().startsWith("5h");
+const chartEnabled = (id, window) => id in chartPrefs ? chartPrefs[id] : isFiveHour(window);
+const compactHistoryProviders = (providers) => (providers || []).map((provider) => ({
+  name: provider.name,
+  windows: (provider.windows || []).filter((window) => Number.isFinite(Number(window.usedPct))).map((window) => ({
+    key: window.key,
+    label: window.label,
+    usedPct: Number(window.usedPct),
+  })),
+})).filter((provider) => provider.name && provider.windows.length);
+
+function chartSeries(data) {
+  const definitions = new Map();
+  for (const provider of data.providers || []) {
+    for (const window of provider.windows || []) {
+      const id = seriesId(provider.name, window);
+      definitions.set(id, { id, provider: provider.name, key: window.key, label: window.label || window.key, points: [] });
+    }
+  }
+  const samplesByTime = new Map();
+  for (const sample of data.history || []) samplesByTime.set(sample.sampledAt, sample);
+  const liveAt = Number(data.updatedAt);
+  if (Number.isFinite(liveAt)) samplesByTime.set(liveAt, { sampledAt: liveAt, providers: compactHistoryProviders(data.providers) });
+  const samples = [...samplesByTime.values()].sort((a, b) => a.sampledAt - b.sampledAt);
+  for (const sample of samples) {
+    for (const provider of sample.providers || []) {
+      for (const window of provider.windows || []) {
+        const id = seriesId(provider.name, window);
+        if (!definitions.has(id)) definitions.set(id, { id, provider: provider.name, key: window.key, label: window.label || window.key, points: [] });
+        definitions.get(id).points.push([sample.sampledAt, Math.max(0, Math.min(100, Number(window.usedPct) || 0))]);
+      }
+    }
+  }
+  return [...definitions.values()];
+}
+
+// Split a series wherever the dashboard stopped sampling, so neither the
+// smoothing below nor the curve tangents reach across a hole in the history.
+function contiguousRuns(points) {
+  const runs = [];
+  for (const point of points) {
+    const run = runs.at(-1);
+    if (run && point[0] - run.at(-1)[0] <= CHART_GAP_MS) run.push(point);
+    else runs.push([point]);
+  }
+  return runs;
+}
+
+function runPath(run, x, y) {
+  const sm = run.map(([, pct]) => pct);
+  for (let pass = 0; pass < 3; pass++) {
+    const next = sm.slice();
+    for (let i = 1; i < sm.length - 1; i++) next[i] = sm[i - 1] * 0.25 + sm[i] * 0.5 + sm[i + 1] * 0.25;
+    sm.splice(0, sm.length, ...next);
+  }
+  const pts = run.map(([time], i) => [x(time), y(sm[i])]);
+  const head = `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
+  // A run of one has no segment to stroke; the round linecap turns an explicit
+  // zero-length line into a dot so an isolated sample stays visible.
+  if (pts.length === 1) return `${head}L${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
+  // Tangents are slopes scaled by each segment, not fixed fractions of the
+  // neighbour span: samples are unevenly spaced, and a uniform Catmull-Rom
+  // throws control points outside a short segment next to a long one, which
+  // draws the line looping backwards in time.
+  const slope = pts.map((point, i) => {
+    const prev = pts[i - 1] || point;
+    const next = pts[i + 1] || point;
+    const span = next[0] - prev[0];
+    return span > 0 ? (next[1] - prev[1]) / span : 0;
+  });
+  let d = head;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const dx = (p2[0] - p1[0]) / 3;
+    d += ` C${(p1[0] + dx).toFixed(1)},${(p1[1] + slope[i] * dx).toFixed(1)} ${(p2[0] - dx).toFixed(1)},${(p2[1] - slope[i + 1] * dx).toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
+  }
+  return d;
+}
+
+function renderChart() {
+  if (!lastData || !chartLegend || !chartPlot) return;
+  const allSeries = chartSeries(lastData);
+  chartLegend.innerHTML = allSeries.map((series) => {
+    const window = { key: series.key, label: series.label };
+    const checked = chartEnabled(series.id, window) ? " checked" : "";
+    return `<label class="series-toggle" style="--series:${providerColor(series.provider)}">
+      <input type="checkbox" data-series="${esc(series.id)}"${checked} />
+      <i></i><span>${esc(series.provider)} · ${esc(captionFor(window))}</span>
+    </label>`;
+  }).join("");
+
+  if (!allSeries.length) {
+    chartPlot.innerHTML = `<p class="chart-empty">Usage history will appear after the first successful refresh.</p>`;
+    return;
+  }
+
+  const width = Math.max(320, chartPlot.clientWidth || 1000);
+  const height = Math.max(150, chartPlot.clientHeight || 300);
+  const pad = { left: 36, right: 12, top: 12, bottom: 24 };
+  const plotW = width - pad.left - pad.right;
+  const plotH = height - pad.top - pad.bottom;
+  const now = Number(lastData.updatedAt) || Date.now();
+  const visibleSeries = allSeries.filter((series) => chartEnabled(series.id, series));
+  const visibleTimes = [...new Set(visibleSeries.flatMap((series) => series.points.map(([time]) => time)))]
+    .filter((time) => time >= now - CHART_MS && time <= now)
+    .sort((a, b) => a - b);
+  const start = visibleTimes.length > 1 ? visibleTimes[0] : now - CHART_MS;
+  const rangeMs = now - start;
+  const x = (time) => pad.left + ((time - start) / rangeMs) * plotW;
+  const peak = Math.max(0, ...visibleSeries.flatMap((series) =>
+    series.points.filter(([time]) => time >= start && time <= now).map(([, pct]) => pct)));
+  const step = peak > 50 ? 25 : peak > 20 ? 10 : 5;
+  const axisTop = Math.min(100, Math.max(step * 2, Math.ceil((peak * 1.15) / step) * step));
+  const ticks = [];
+  for (let pct = 0; pct <= axisTop + 0.001; pct += step) ticks.push(pct);
+  const y = (pct) => pad.top + (1 - pct / axisTop) * plotH;
+  const grid = ticks.map((pct) => `<g><line x1="${pad.left}" y1="${y(pct)}" x2="${width - pad.right}" y2="${y(pct)}"/><text x="${pad.left - 10}" y="${y(pct) + 4}" text-anchor="end">${pct}</text></g>`).join("");
+  const agoLabel = (ms) => {
+    if (!ms) return "now";
+    if (ms >= 3600e3) {
+      const hours = ms / 3600e3;
+      return `−${hours >= 10 || Number.isInteger(hours) ? Math.round(hours) : hours.toFixed(1)}h`;
+    }
+    if (ms >= 60000) return `−${Math.round(ms / 60000)}m`;
+    return `−${Math.max(1, Math.round(ms / 1000))}s`;
+  };
+  const times = [4, 3, 2, 1, 0].map((steps, index) => {
+    const xx = pad.left + (index / 4) * plotW;
+    return `<text x="${xx}" y="${height - 9}" text-anchor="${index === 0 ? "start" : index === 4 ? "end" : "middle"}">${agoLabel(rangeMs * steps / 4)}</text>`;
+  }).join("");
+  const paths = allSeries.map((series, index) => {
+    if (!chartEnabled(series.id, series)) return "";
+    const points = series.points.filter(([time]) => time >= start && time <= now).sort((a, b) => a[0] - b[0]);
+    if (!points.length) return "";
+    const d = contiguousRuns(points).map((run) => runPath(run, x, y)).join(" ");
+    const end = points.at(-1);
+    const dash = String(series.key).toLowerCase().startsWith("5h") ? "" : ` stroke-dasharray="${index % 2 ? "3 5" : "9 5"}"`;
+    return `<path class="usage-line" d="${d}" stroke="${providerColor(series.provider)}"${dash}><title>${esc(series.provider)} ${esc(series.label)}: ${Math.round(end[1])}%</title></path>`;
+  }).join("");
+  chartPlot.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Provider usage percentages over the last 24 hours"><g class="chart-grid">${grid}${times}</g>${paths}</svg>`;
+}
+
+let chartResizeFrame = null;
+window.addEventListener("resize", () => {
+  if (chartResizeFrame) cancelAnimationFrame(chartResizeFrame);
+  chartResizeFrame = requestAnimationFrame(() => { chartResizeFrame = null; renderChart(); });
+});
+
+chartLegend?.addEventListener("change", (event) => {
+  const input = event.target;
+  if (!input.matches("[data-series]")) return;
+  chartPrefs[input.dataset.series] = input.checked;
+  saveChartPrefs();
+  renderChart();
+});
+
+// ---------- settings panel ----------
+function metricRows(p) {
+  const rows = [
+    ...(p.windows || []).map((w) => ({ id: winId(w), label: w.label || w.key, hint: w.unit || "", kind: "window" })),
+    ...(p.extras || []).map((x) => ({ id: extraId(x), label: x.label, hint: "info", kind: "extra" })),
+  ];
+  const seen = new Set();
+  return rows.filter((r) => r.id && !seen.has(r.id) && seen.add(r.id));
+}
+function renderSettings() {
+  const providers = (lastData && lastData.providers) || [];
+  if (!providers.length) {
+    settingsBody.innerHTML = `<p class="spinner">Waiting for data…</p>`;
+    return;
+  }
+  settingsBody.innerHTML = providers.map((p) => {
+    const rows = metricRows(p);
+    const armRow = p.autoArm ? `
+      <label class="set-row" title="Send a tiny paid inference when the 5h window is unarmed so its reset timer starts counting">
+        <input type="checkbox" data-autoarm="${esc(p.name)}" ${p.autoArm.enabled ? "checked" : ""} />
+        <span class="set-label">Auto-arm 5h window</span>
+        <span class="hint">${p.autoArm.enabled ? "pings when unarmed" : "display only"}</span>
+      </label>
+      <div class="set-sep"></div>` : "";
+    if (!rows.length) {
+      // Empty because the provider is erroring, not because metrics are off.
+      const msg = p.error ? `${esc(p.error)} — no metrics until it recovers` : "No metrics available.";
+      return `<section class="set-card"><div class="set-head"><strong>${esc(p.name)}</strong></div>${armRow}<p class="set-empty">${msg}</p></section>`;
+    }
+    // The radio marks the window the card actually gauges, defaults included,
+    // so an untouched provider shows where its gauge came from.
+    const shownWins = (p.windows || []).filter((w) => isEnabled(p.name, winId(w)));
+    const primary = pickPrimaryWindow(shownWins, p.name);
+    const primaryId = primary ? winId(primary) : "";
+    return `<section class="set-card" data-provider="${esc(p.name)}">
+      <div class="set-head">
+        <strong>${esc(p.name)}</strong>
+        <span class="set-actions">
+          <button class="link-btn" data-bulk="${esc(p.name)}" data-on="1">all</button>
+          <button class="link-btn" data-bulk="${esc(p.name)}" data-on="0">none</button>
+          <span class="set-col-label" title="Which metric fills the big dot gauge; the rest become bars">gauge</span>
+        </span>
+      </div>
+      ${armRow}
+      ${rows.map((r) => `
+        <div class="set-row">
+          <label class="set-pick">
+            <input type="checkbox" data-provider="${esc(p.name)}" data-metric="${esc(r.id)}" ${isEnabled(p.name, r.id) ? "checked" : ""} />
+            <span class="set-label">${esc(r.label)}</span>
+            <span class="hint">${esc(r.hint)}</span>
+          </label>
+          ${r.kind === "window"
+            ? `<label class="set-primary" title="Make this the primary gauge">
+                <input type="radio" name="primary-${esc(p.name)}" data-primary-provider="${esc(p.name)}" data-primary-metric="${esc(r.id)}" ${r.id === primaryId ? "checked" : ""} />
+              </label>`
+            : `<span class="set-primary"></span>`}
+        </div>`).join("")}
+    </section>`;
+  }).join("");
+}
+function openSettings() {
+  renderSettings();
+  settingsOverlay.hidden = false;
+}
+function closeSettings() {
+  settingsOverlay.hidden = true;
+}
+document.getElementById("settings-btn").onclick = openSettings;
+document.getElementById("settings-close").onclick = closeSettings;
+settingsOverlay.addEventListener("click", (e) => { if (e.target === settingsOverlay) closeSettings(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !settingsOverlay.hidden) closeSettings(); });
+settingsBody.addEventListener("change", (e) => {
+  const t = e.target;
+  if (t.matches("input[type=checkbox][data-autoarm]")) {
+    toggleAutoArm(t.dataset.autoarm, t.checked, t);
+    return;
+  }
+  if (t.matches("input[type=radio][data-primary-metric]")) {
+    const provider = t.dataset.primaryProvider;
+    const id = t.dataset.primaryMetric;
+    setPrimaryMetric(provider, id);
+    // Gauging a metric implies showing it.
+    if (!isEnabled(provider, id)) setEnabled(provider, id, true);
+    renderGrid();
+    renderSettings();
+    return;
+  }
+  if (t.matches("input[type=checkbox][data-metric]")) {
+    const provider = t.dataset.provider;
+    const id = t.dataset.metric;
+    setEnabled(provider, id, t.checked);
+    // Hiding the gauged window hands the gauge back to the default pick.
+    if (!t.checked && primaryPrefs[provider] === id) setPrimaryMetric(provider, null);
+    renderGrid();
+    renderSettings();
+  }
+});
+
+async function toggleAutoArm(provider, enabled, input) {
+  input.disabled = true;
+  try {
+    const r = await fetch("/api/autoarm", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider, enabled }),
+    });
+    const s = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(s.error || `HTTP ${r.status}`);
+    for (const p of lastData?.providers || []) {
+      if (p.name === provider && p.autoArm) p.autoArm.enabled = enabled;
+    }
+    renderGrid();
+  } catch (e) {
+    if (input) input.checked = !enabled;
+    alert("Could not save auto-arm setting: " + e.message);
+  } finally {
+    if (input) input.disabled = false;
+  }
+}
+settingsBody.addEventListener("click", (e) => {
+  const btn = e.target.closest(".link-btn");
+  if (!btn) return;
+  const provider = btn.dataset.bulk;
+  for (const p of (lastData?.providers || [])) {
+    if (p.name !== provider) continue;
+    for (const r of metricRows(p)) setEnabled(provider, r.id, btn.dataset.on === "1");
+    if (btn.dataset.on !== "1") setPrimaryMetric(provider, null);
+  }
+  savePrefs();
+  renderGrid();
+  renderSettings();
+});
+
+async function load(force = false) {
+  try {
+    // force: manual click — makes the server retry Claude past its backoff.
+    const r = await fetch("/api/usage" + (force ? "?refresh" : ""));
+    const data = await r.json();
+    lastData = data;
+    updatedEl.textContent = "Updated " + new Date(data.updatedAt).toLocaleTimeString();
+    renderGrid();
+    renderChart();
+    if (!settingsOverlay.hidden) renderSettings();
+    const pending = (data.providers || []).some((p) => p.auth?.pending);
+    if (pending) startStatusPoll();
+    else stopStatusPoll();
+  } catch (e) {
+    updatedEl.textContent = "error: " + e;
+  }
+}
+
+function patchOAuth(slug, s) {
+  if (!lastData) return;
+  lastData = {
+    ...lastData,
+    providers: lastData.providers.map((p) => {
+      if (oauthSlug(p) !== slug) return p;
+      if (s.connected) return { ...p, connected: true, error: null, auth: undefined };
+      return {
+        ...p,
+        connected: false,
+        auth: {
+          slug,
+          pending: {
+            user_code: s.user_code || "",
+            verification_url: s.verification_url || "",
+            manual_url: s.manual_url || "",
+            error: s.error || null,
+          },
+        },
+      };
+    }),
+  };
+  renderGrid();
+}
+
+async function startOAuthLogin(slug) {
+  try {
+    const r = await fetch(`/api/${slug}/login`, { method: "POST" });
+    const s = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(s.error || `HTTP ${r.status}`);
+    patchOAuth(slug, s);
+    if (s.connected) load();
+    else startStatusPoll();
+  } catch (e) {
+    patchOAuth(slug, { pending: true, error: String(e.message || e), user_code: "", verification_url: "" });
+  }
+}
+function startStatusPoll() {
+  if (pendingPoll) return;
+  pendingPoll = setInterval(async () => {
+    try {
+      const slugs = [...new Set((lastData?.providers || []).filter((p) => p.auth && !p.connected).map(oauthSlug))];
+      for (const slug of slugs) {
+        const r = await fetch(`/api/${slug}/status`);
+        const s = await r.json();
+        if (s.connected) { stopStatusPoll(); load(); return; }
+        if (s.pending || s.error) {
+          const next = {
+            user_code: s.user_code || "",
+            verification_url: s.verification_url || "",
+            manual_url: s.manual_url || "",
+            error: s.error || null,
+          };
+          const cur = ((lastData?.providers || []).find((p) => oauthSlug(p) === slug)?.auth) || {};
+          const unchanged = cur.pending && Object.keys(next).every((k) => (cur.pending[k] || "") === next[k]);
+          if (!unchanged) patchOAuth(slug, s);
+        } else {
+          // Login session vanished server-side (restart / completed elsewhere):
+          // fall back to the Connect button instead of spinning forever.
+          const cur = (lastData?.providers || []).find((p) => oauthSlug(p) === slug)?.auth;
+          if (cur?.pending) patchOAuth(slug, {});
+        }
+      }
+    } catch {}
+  }, 3000);
+}
+function stopStatusPoll() {
+  if (pendingPoll) { clearInterval(pendingPoll); pendingPoll = null; }
+}
+
+document.getElementById("refresh").onclick = () => load(true);
+async function submitPasteCode(slug, code) {
+  try {
+    const r = await fetch(`/api/${slug}/code`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    const s = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(s.error || `HTTP ${r.status}`);
+    if (s.connected) { stopStatusPoll(); load(); }
+  } catch (e) {
+    const prev = ((lastData?.providers || []).find((p) => oauthSlug(p) === slug)?.auth) || {};
+    const pending = prev.pending || {};
+    patchOAuth(slug, {
+      pending: true,
+      error: String(e.message || e),
+      user_code: pending.user_code || "",
+      verification_url: pending.verification_url || "",
+      manual_url: pending.manual_url || "",
+    });
+  }
+}
+async function logoutOfService(slug, name) {
+  try {
+    const r = await fetch(`/api/${slug}/logout`, { method: "POST" });
+    const s = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(s.error || `HTTP ${r.status}`);
+    stopStatusPoll();
+    await load();
+  } catch (e) {
+    alert("Log out failed: " + e.message);
+  }
+}
+grid.addEventListener("click", (e) => {
+  const out = e.target && e.target.closest && e.target.closest("[data-logout]");
+  if (out) {
+    const name = out.dataset.name || out.dataset.logout;
+    if (!confirm(`Log out of ${name}?\nThe dashboard will forget its stored credentials for this service.`)) return;
+    out.disabled = true;
+    logoutOfService(out.dataset.logout, name).finally(() => { out.disabled = false; });
+    return;
+  }
+  const btn = e.target && e.target.closest && e.target.closest("[data-connect]");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Starting…";
+    startOAuthLogin(btn.dataset.connect);
+    return;
+  }
+  const paste = e.target && e.target.closest && e.target.closest("[data-paste]");
+  if (paste) {
+    const input = document.querySelector(`[data-paste-input="${paste.dataset.paste}"]`);
+    const code = (input && input.value || "").trim();
+    if (!code) { if (input) input.focus(); return; }
+    paste.disabled = true;
+    paste.textContent = "Submitting…";
+    submitPasteCode(paste.dataset.paste, code).finally(() => {
+      paste.disabled = false;
+      paste.textContent = "Submit";
+    });
+  }
+});
+setInterval(updateCountdowns, 1000);
+migrateClientHistory().finally(load);
+setInterval(() => load(), REFRESH_MS);

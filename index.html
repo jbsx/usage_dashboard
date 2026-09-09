@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Usage Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>AI Provider Usage</h1>
+    <div class="meta">
+      <span id="updated">—</span>
+      <button id="refresh" title="Refresh now">⟳ Refresh</button>
+      <button id="settings-btn" title="Choose which metrics to show">⚙ Metrics</button>
+    </div>
+  </header>
+  <main>
+    <div id="grid"></div>
+    <section id="usage-chart" aria-labelledby="chart-title">
+      <div class="chart-head">
+        <div>
+          <h2 id="chart-title">Usage history</h2>
+          <p>Rolling history, up to 24 hours · percentage used</p>
+        </div>
+        <span class="live-mark"><i></i> live</span>
+      </div>
+      <div id="chart-legend" class="chart-legend" aria-label="Chart series"></div>
+      <div id="chart-plot" class="chart-plot"></div>
+    </section>
+  </main>
+  <footer>Plain HTML/CSS/JS · data fetched from the local server every 60s.</footer>
+  <div id="settings-overlay" hidden>
+    <div id="settings-panel" role="dialog" aria-label="Metric settings">
+      <div class="settings-head">
+        <h2>Metrics per card</h2>
+        <button id="settings-close" title="Close">×</button>
+      </div>
+      <div id="settings-body"></div>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
