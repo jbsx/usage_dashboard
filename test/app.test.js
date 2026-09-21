@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 
-function loadCardRenderer(storedPrefsJson, storedChartPrefsJson, sharedStorage = new Map(), fetchImpl) {
+// options.phone: pretend the (max-width: 600px) media query matches, which
+// swaps the card to its headline-row layout and the chart to 12 hours.
+function loadCardRenderer(storedPrefsJson, storedChartPrefsJson, sharedStorage = new Map(), fetchImpl, options = {}) {
   const elements = new Map();
   const element = (id) => {
     if (!elements.has(id)) {
@@ -37,9 +39,10 @@ function loadCardRenderer(storedPrefsJson, storedChartPrefsJson, sharedStorage =
     alert() {},
     confirm: () => true,
   };
+  if (options.phone) context.matchMedia = () => ({ matches: true, addEventListener() {} });
   const source = fs.readFileSync(new URL("../app.js", import.meta.url), "utf8");
   vm.runInNewContext(
-    source + "\nglobalThis.__api = { cardHtml, renderGrid, renderChart, shortCountdown, setData: (d) => { lastData = d; }, gridEl: grid, chartLegend, chartPlot };",
+    source + "\nglobalThis.__api = { cardHtml, renderGrid, renderChart, renderSettings, shortCountdown, setData: (d) => { lastData = d; }, gridEl: grid, chartLegend, chartPlot, chartSubtitle, settingsBody };",
     context,
   );
   return context.__api;
@@ -386,6 +389,83 @@ test("erroring provider with no data still renders its card", () => {
   });
 
   assert.match(html, /<section class="card"/);
+});
+
+const claudePhoneCard = {
+  name: "Claude", connected: true, plan: "Max 20x", canLogout: true,
+  windows: [
+    { key: "5h", label: "5-Hour", usedPct: 60, resetAt: Date.now() + 4.35 * 3600e3 },
+    { key: "7d", label: "7-Day", usedPct: 46, resetAt: Date.now() + 5 * 86400e3 },
+    { key: "7d-fable", label: "7-Day (Fable)", usedPct: 22, resetAt: Date.now() + 5 * 86400e3 },
+  ],
+  extras: [{ label: "Spend", text: "18.40 GBP" }],
+};
+
+test("phone card shows the primary window as one bar row and folds the rest", () => {
+  const { cardHtml } = loadCardRenderer(undefined, undefined, new Map(), undefined, { phone: true });
+  const html = cardHtml(claudePhoneCard, false);
+
+  assert.doesNotMatch(html, /dots-wrap/);
+  assert.match(html, /<div class="minibars headline">\s*<div class="minibar">\s*<span class="mb-cap" title="5-Hour">5h</);
+  // Two secondary windows plus one extra are folded, and the fold starts closed.
+  assert.match(html, /<button class="more-btn" data-more="Claude" aria-expanded="false">3 more<\/button>/);
+  assert.match(html, /<div class="fold" hidden>/);
+  assert.match(html, /Spend/);
+  // The elapsed-time tick replaces the dot grid's signal; 13% of the 5h window is gone.
+  assert.match(html, /class="mb-tick" style="left:13%"/);
+  // The desktop card keeps its gauge and grows no toggle.
+  const desktop = loadCardRenderer().cardHtml(claudePhoneCard, false);
+  assert.match(desktop, /dots-wrap/);
+  assert.doesNotMatch(desktop, /more-btn|mb-tick/);
+});
+
+test("phone fold stays open across re-renders once expanded", () => {
+  const storage = new Map([["usage-dashboard-expanded-prefs", JSON.stringify({ Claude: true })]]);
+  const { cardHtml } = loadCardRenderer(undefined, undefined, storage, undefined, { phone: true });
+  const html = cardHtml(claudePhoneCard, false);
+
+  assert.match(html, /aria-expanded="true">3 more</);
+  assert.match(html, /<div class="fold">/);
+  assert.doesNotMatch(html, /class="fold" hidden/);
+});
+
+test("a phone card with a single window has nothing to fold", () => {
+  const { cardHtml } = loadCardRenderer(undefined, undefined, new Map(), undefined, { phone: true });
+  const html = cardHtml(windowFixture("Grok", 30, { resetAt: Date.now() + 86400e3 }), false);
+
+  assert.match(html, /class="minibars headline"/);
+  assert.doesNotMatch(html, /more-btn|class="fold"/);
+});
+
+test("phone countdowns keep two units; desktop keeps all of them", () => {
+  const far = Date.now() + 10 * 86400e3 + 23 * 3600e3 + 59 * 60e3 + 30e3;
+  assert.match(loadCardRenderer(undefined, undefined, new Map(), undefined, { phone: true }).shortCountdown(far), /^10d 23h$/);
+  assert.match(loadCardRenderer().shortCountdown(far), /^10d 23h 59m$/);
+});
+
+test("phone chart covers 12 hours instead of 24", () => {
+  const phone = loadCardRenderer(undefined, undefined, new Map(), undefined, { phone: true });
+  const now = 48 * 3600e3;
+  const provider = (usedPct) => [{ name: "Claude", windows: [{ key: "5h", label: "5-Hour", usedPct }] }];
+  phone.setData({ updatedAt: now, providers: provider(35), history: [{ sampledAt: now - 20 * 3600e3, providers: provider(20) }] });
+  phone.renderChart();
+
+  // The 20-hour-old sample falls outside the range, so the axis spans the default 12 hours.
+  assert.match(phone.chartPlot.innerHTML, /aria-label="Provider usage percentages over the last 12 hours"/);
+  assert.match(phone.chartPlot.innerHTML, /−12h/);
+  assert.doesNotMatch(phone.chartPlot.innerHTML, /−24h|−20h/);
+  assert.equal(phone.chartSubtitle.textContent, "Rolling history, up to 12 hours · percentage used");
+});
+
+test("settings panel carries plan and Log out so the phone card can drop them", () => {
+  const { renderSettings, setData, settingsBody } = loadCardRenderer();
+  setData({ updatedAt: 0, providers: [claudePhoneCard, windowFixture("GLM", 10, {}, { plan: "lite" })] });
+  renderSettings();
+
+  assert.match(settingsBody.innerHTML, /<strong>Claude<span class="plan-inline">Max 20x<\/span><\/strong>/);
+  assert.match(settingsBody.innerHTML, /class="link-btn logout-link" data-logout="claude" data-name="Claude"/);
+  // GLM is keyed, not OAuth: nothing to log out of.
+  assert.doesNotMatch(settingsBody.innerHTML, /data-logout="glm"/);
 });
 
 test("history chart defaults to 5h series and scales the axis to the visible peak", () => {

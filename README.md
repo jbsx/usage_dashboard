@@ -16,6 +16,8 @@ Plain HTML, CSS and JavaScript on a Node standard-library server. No build step,
 
 **A 24-hour history chart.** Every window from every provider is a toggleable series. Click a legend entry to add or drop a line; the choice is remembered locally.
 
+**On a phone, the same page folds down.** Each card shows one bar row for its primary window, with a tick on the track marking how far through the window you are; the other windows sit under a *N more* toggle. The chart shows the last 12 hours, the page scrolls, and plan names and Log out move to the ⚙ panel.
+
 **Reset countdowns that mean something.** A window that has never been used doesn't start counting down — see *auto-arm* below.
 
 ## Providers

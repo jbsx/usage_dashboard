@@ -34,14 +34,12 @@ body {
   color: var(--text);
   font: 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   padding: 12px 14px;
-  /* The dashboard lives in a fixed window band: it fits the viewport or it
-     shrinks the chart, but it never scrolls. */
+  /* On a desktop the dashboard lives in a fixed window band: it fits the
+     viewport or it shrinks the chart, but it never scrolls. A phone is the
+     exception below: four stacked cards cannot fit, so the page scrolls and
+     the chart keeps a floor instead. */
   display: flex; flex-direction: column; gap: 10px;
   overflow: hidden;
-}
-@media (max-width: 600px) {
-  body { padding: 10px; }
-  #grid { gap: 8px; }
 }
 main {
   flex: 1 1 auto; min-height: 0;
@@ -88,6 +86,9 @@ h1 { font-size: 17px; margin: 0; font-weight: 600; }
   font-size: 12px; padding: 0;
 }
 .link-btn:hover { text-decoration: underline; }
+.logout-link { color: var(--muted); }
+.logout-link:hover { color: var(--red); }
+.set-head .plan-inline { margin-left: 6px; }
 .set-row {
   display: flex; align-items: center; gap: 8px; padding: 5px 2px;
   cursor: pointer; border-radius: 6px; font-size: 13px;
@@ -134,10 +135,6 @@ h1 { font-size: 17px; margin: 0; font-weight: 600; }
 .chart-grid text { fill: var(--muted); font: 12px Inter, sans-serif; }
 .usage-line { fill: none; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
 .chart-empty { color: var(--muted); height: 100%; margin: 0; display: grid; place-items: center; font-size: 12px; }
-@media (max-width: 600px) {
-  #usage-chart { padding: 10px; }
-  .chart-legend { margin-left: 4px; }
-}
 .card {
   background: var(--bg); border: 1px solid var(--border);
   border-radius: 12px; padding: 12px 14px;
@@ -209,13 +206,28 @@ h1 { font-size: 17px; margin: 0; font-weight: 600; }
   align-items: center; gap: 8px; font-size: 11px;
 }
 .mb-cap { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mb-track { height: 12px; border-radius: 2px; background: var(--dot-off); overflow: hidden; }
+.mb-track { position: relative; height: 12px; border-radius: 2px; background: var(--dot-off); overflow: hidden; }
 .mb-fill { display: block; height: 100%; border-radius: 2px; }
+/* Phone rows only: how far through the window's duration we are, the signal
+   the desktop dot grid carries. */
+.mb-tick { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text); opacity: .85; }
 .mb-pct { color: var(--text); font-variant-numeric: tabular-nums; text-align: right; }
 .mb-pct.over { color: var(--red); }
 .mb-reset { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
 /* An unarmed window: legible, but plainly not a running countdown. */
 .na { color: var(--muted); opacity: .72; }
+/* Phone card: the "N more" toggle in the head, and the fold it opens. */
+.more-btn {
+  margin-left: auto; background: none; border: 0; padding: 0 2px; cursor: pointer;
+  color: var(--muted); font: 11px Inter, -apple-system, sans-serif;
+  display: flex; align-items: center; gap: 4px;
+}
+.more-btn::after { content: "▾"; font-size: 10px; transition: transform .15s; }
+.more-btn[aria-expanded="true"]::after { transform: rotate(180deg); }
+.more-btn:hover, .more-btn:focus-visible { color: var(--text); outline: none; }
+.fold { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.fold[hidden] { display: none; }
+.fold .minibars, .fold .extras { margin-top: 0; }
 .extras { border-top: 1px solid var(--border); margin-top: 7px; padding-top: 7px; }
 .extra { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-bottom: 2px; }
 .error { color: var(--red); font-size: 13px; }
@@ -242,3 +254,33 @@ h1 { font-size: 17px; margin: 0; font-weight: 600; }
 .btn.ghost { background: var(--card-2); color: var(--text); border: 1px solid var(--border); }
 .spinner { color: var(--muted); font-size: 13px; }
 footer { display: none; }
+
+/* ---- Phone: one headline row per card, the rest folded; page scrolls. The
+   breakpoint matches PHONE_QUERY in app.js, which swaps the card markup. ---- */
+@media (max-width: 600px) {
+  html { height: auto; }
+  /* Fills a tall phone so the chart reaches the bottom; scrolls on a short one. */
+  body { height: auto; min-height: 100dvh; padding: 10px; overflow: visible; }
+  main { min-height: auto; }
+  header { gap: 8px; }
+  h1 { font-size: 15px; }
+  .meta { gap: 8px; font-size: 12px; }
+  #refresh, #settings-btn { padding: 5px 9px; }
+  .btn-label { display: none; }
+  #grid { gap: 10px; }
+  .card { padding: 10px 12px 11px; }
+  .card-head { align-items: center; margin-bottom: 4px; }
+  .card h2 { font-size: 14px; }
+  /* Plan and Log out move to the ⚙ panel; the head is name and toggle only. */
+  .card .plan-inline, .card .logout-btn { display: none; }
+  .minibars { margin-top: 0; gap: 8px; }
+  .minibar { grid-template-columns: 48px 1fr 34px 58px; gap: 9px; font-size: 12px; }
+  .mb-track { height: 8px; }
+  .extras { margin-top: 0; }
+  .extra { font-size: 11px; }
+  /* Whatever the cards leave, but never so little that the plot is a sliver. */
+  #usage-chart { flex: 1 1 auto; min-height: 240px; padding: 10px; }
+  .chart-legend { margin: 8px 0 4px 4px; }
+  .chart-plot { min-height: 160px; }
+  .chart-grid text { font-size: 11px; }
+}

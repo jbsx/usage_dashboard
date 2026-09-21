@@ -5,16 +5,28 @@ const settingsOverlay = document.getElementById("settings-overlay");
 const settingsBody = document.getElementById("settings-body");
 const chartLegend = document.getElementById("chart-legend");
 const chartPlot = document.getElementById("chart-plot");
+const chartSubtitle = document.getElementById("chart-subtitle");
 let pendingPoll = null;
 let lastData = null;
+
+// On a phone the card trades its dot gauge for one headline bar row, folds the
+// other windows under a "N more" toggle, and the chart shows 12 hours instead
+// of 24. The breakpoint matches style.css. Tests run without matchMedia and
+// get the desktop layout.
+const PHONE_QUERY = "(max-width: 600px)";
+const phoneMedia = typeof matchMedia === "function" ? matchMedia(PHONE_QUERY) : null;
+const isPhone = () => Boolean(phoneMedia && phoneMedia.matches);
+phoneMedia?.addEventListener?.("change", () => { renderGrid(); renderChart(); });
 
 const PREFS_KEY = "usage-dashboard-metric-prefs";
 const CHART_PREFS_KEY = "usage-dashboard-chart-prefs";
 const PRIMARY_PREFS_KEY = "usage-dashboard-primary-prefs";
+const EXPANDED_PREFS_KEY = "usage-dashboard-expanded-prefs";
 const LIVE_HISTORY_KEY = "usage-dashboard-live-history";
 let prefs = loadPrefs();
 let chartPrefs = loadChartPrefs();
 let primaryPrefs = loadPrimaryPrefs();
+let expandedPrefs = loadExpandedPrefs();
 let firstRender = true;
 
 function loadPrefs() {
@@ -34,6 +46,18 @@ function loadPrimaryPrefs() {
 }
 function savePrimaryPrefs() {
   try { localStorage.setItem(PRIMARY_PREFS_KEY, JSON.stringify(primaryPrefs)); } catch {}
+}
+function loadExpandedPrefs() {
+  try { return JSON.parse(localStorage.getItem(EXPANDED_PREFS_KEY)) || {}; } catch { return {}; }
+}
+// Which phone cards are unfolded; the poll re-renders every card, so the
+// choice has to outlive the markup.
+function isExpanded(provider) {
+  return expandedPrefs[provider] === true;
+}
+function setExpanded(provider, on) {
+  if (on) expandedPrefs[provider] = true; else delete expandedPrefs[provider];
+  try { localStorage.setItem(EXPANDED_PREFS_KEY, JSON.stringify(expandedPrefs)); } catch {}
 }
 const winId = (w) => String(w.key || w.label || "");
 const extraId = (x) => "extra:" + (x.label || "");
@@ -115,7 +139,10 @@ function dotGridHtml(pct, caption, color, stagger, fillPct) {
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 const SECONDS_BELOW_MS = 10 * 60e3;
-function remaining(resetAt) {
+// A phone row has room for two units ("10d 23h", "3h 15m"); the third never
+// changes a decision and costs the column its width.
+const PHONE_COUNTDOWN_UNITS = 2;
+function remaining(resetAt, maxUnits = Infinity) {
   const left = Math.max(0, resetAt - Date.now());
   let s = Math.floor(left / 1000);
   const d = Math.floor(s / 86400); s -= d * 86400;
@@ -126,7 +153,7 @@ function remaining(resetAt) {
   if (h || d) parts.push(h + "h");
   parts.push(m + "m");
   if (left < SECONDS_BELOW_MS) parts.push(s + "s");
-  return parts.join(" ");
+  return parts.slice(0, maxUnits).join(" ");
 }
 // Countdowns render bare next to their window caption ("5h · 3h 15m"); the
 // caption and column position carry the meaning a "resets in" prefix would.
@@ -136,7 +163,7 @@ function remaining(resetAt) {
 const UNARMED_TEXT = "unarmed";
 const UNARMED_TITLE = "No reset scheduled — this window starts counting at its first use";
 function shortCountdown(resetAt) {
-  return resetAt ? remaining(resetAt) : UNARMED_TEXT;
+  return resetAt ? remaining(resetAt, isPhone() ? PHONE_COUNTDOWN_UNITS : Infinity) : UNARMED_TEXT;
 }
 function countdownHtml(resetAt, className = "") {
   const cls = [className, resetAt ? "" : "na"].filter(Boolean).join(" ");
@@ -190,13 +217,19 @@ function pickPrimaryWindow(wins, provider) {
   const id = (w) => String(w.key || w.label || "").toLowerCase();
   return wins.find((w) => id(w).startsWith("5h")) || wins.find((w) => id(w).startsWith("7d")) || wins[0];
 }
-function miniBarHtml(w, color) {
+// tickAt: when given, a marker on the track shows how far through the window's
+// duration we are — the same signal the dot grid carries on desktop, which a
+// phone card has no gauge to show. Omitted (desktop bars), the row is plain.
+function miniBarHtml(w, color, tickAt) {
   const raw = Math.max(0, w.usedPct || 0);
   const clamped = Math.min(100, raw);
   const title = captionTitle(w);
+  const fill = tickAt == null ? null : gridFillPct(w, tickAt);
+  // Clamped short of 100 so a reset-imminent tick stays inside the clipped track.
+  const tick = fill ? `<i class="mb-tick" style="left:${Math.min(fill, 99)}%"></i>` : "";
   return `<div class="minibar">
     <span class="mb-cap"${title ? ` title="${esc(title)}"` : ""}>${esc(captionFor(w))}</span>
-    <span class="mb-track"><i class="mb-fill" style="width:${Math.round(clamped)}%;background:${color}"></i></span>
+    <span class="mb-track"><i class="mb-fill" style="width:${Math.round(clamped)}%;background:${color}"></i>${tick}</span>
     <span class="mb-pct${raw > 100 ? " over" : ""}">${Math.round(raw)}%</span>
     ${countdownHtml(w.resetAt, "mb-reset")}
   </div>`;
@@ -265,6 +298,7 @@ function providerErrorText(p) {
 }
 function cardHtml(p, stagger, now = Date.now()) {
   let body;
+  let moreBtn = "";
   if (!p.connected && p.auth) {
     body = oauthConnectHtml(p);
   } else if (p.error && !p.connected) {
@@ -277,10 +311,23 @@ function cardHtml(p, stagger, now = Date.now()) {
     if (hasMetrics && !wins.length && !extras.length) return "";
     const primary = pickPrimaryWindow(wins, p.name);
     const rest = primary ? wins.filter((w) => w !== primary) : [];
-    const restHtml = rest.length
-      ? `<div class="minibars">${rest.map((w) => miniBarHtml(w, color)).join("")}</div>`
-      : "";
-    body = (primary ? gaugeHtml(primary, color, stagger, now) : "") + restHtml + extrasHtml(extras);
+    if (isPhone()) {
+      // The primary window is the headline row; everything else folds.
+      const folded = rest.length + extras.length;
+      const open = isExpanded(p.name);
+      moreBtn = folded
+        ? `<button class="more-btn" data-more="${esc(p.name)}" aria-expanded="${open}">${folded} more</button>`
+        : "";
+      const headline = primary ? `<div class="minibars headline">${miniBarHtml(primary, color, now)}</div>` : "";
+      const restHtml = rest.length ? `<div class="minibars">${rest.map((w) => miniBarHtml(w, color, now)).join("")}</div>` : "";
+      const fold = folded ? `<div class="fold"${open ? "" : " hidden"}>${restHtml}${extrasHtml(extras)}</div>` : "";
+      body = headline + fold;
+    } else {
+      const restHtml = rest.length
+        ? `<div class="minibars">${rest.map((w) => miniBarHtml(w, color)).join("")}</div>`
+        : "";
+      body = (primary ? gaugeHtml(primary, color, stagger, now) : "") + restHtml + extrasHtml(extras);
+    }
     if (!wins.length && !extras.length) {
       // A connected card with no data and an error (e.g. usage endpoint
       // 429ing before any good data was cached) must not render blank.
@@ -296,7 +343,7 @@ function cardHtml(p, stagger, now = Date.now()) {
   return `<section class="card">
     <div class="card-head">
       <h2>${esc(p.name)}${p.plan ? `<span class="plan-inline">${esc(p.plan)}</span>` : ""}${p.connected ? "" : '<span class="plan-inline">· not connected</span>'}</h2>
-      ${logoutBtn}
+      ${moreBtn}${logoutBtn}
     </div>
     ${body}
   </section>`;
@@ -316,7 +363,10 @@ function renderGrid() {
 
 // ---------- history chart ----------
 const CHART_HOURS = 24;
-const CHART_MS = CHART_HOURS * 3600e3;
+// A phone plot is a third as wide, so 24 hours of 5h sawtooth blurs into noise;
+// half the range keeps each cycle legible.
+const PHONE_CHART_HOURS = 12;
+const chartHours = () => (isPhone() ? PHONE_CHART_HOURS : CHART_HOURS);
 // The dashboard only samples while it is running, so history has holes. A few
 // missed refreshes still read as one line; a longer silence is drawn as a break
 // rather than a stroke implying usage we never observed.
@@ -438,11 +488,14 @@ function renderChart() {
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
   const now = Number(lastData.updatedAt) || Date.now();
+  const hours = chartHours();
+  const chartMs = hours * 3600e3;
+  if (chartSubtitle) chartSubtitle.textContent = `Rolling history, up to ${hours} hours · percentage used`;
   const visibleSeries = allSeries.filter((series) => chartEnabled(series.id, series));
   const visibleTimes = [...new Set(visibleSeries.flatMap((series) => series.points.map(([time]) => time)))]
-    .filter((time) => time >= now - CHART_MS && time <= now)
+    .filter((time) => time >= now - chartMs && time <= now)
     .sort((a, b) => a - b);
-  const start = visibleTimes.length > 1 ? visibleTimes[0] : now - CHART_MS;
+  const start = visibleTimes.length > 1 ? visibleTimes[0] : now - chartMs;
   const rangeMs = now - start;
   const x = (time) => pad.left + ((time - start) / rangeMs) * plotW;
   const peak = Math.max(0, ...visibleSeries.flatMap((series) =>
@@ -475,7 +528,7 @@ function renderChart() {
     const dash = String(series.key).toLowerCase().startsWith("5h") ? "" : ` stroke-dasharray="${index % 2 ? "3 5" : "9 5"}"`;
     return `<path class="usage-line" d="${d}" stroke="${providerColor(series.provider)}"${dash}><title>${esc(series.provider)} ${esc(series.label)}: ${Math.round(end[1])}%</title></path>`;
   }).join("");
-  chartPlot.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Provider usage percentages over the last 24 hours"><g class="chart-grid">${grid}${times}</g>${paths}</svg>`;
+  chartPlot.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Provider usage percentages over the last ${hours} hours"><g class="chart-grid">${grid}${times}</g>${paths}</svg>`;
 }
 
 let chartResizeFrame = null;
@@ -526,10 +579,17 @@ function renderSettings() {
     const shownWins = (p.windows || []).filter((w) => isEnabled(p.name, winId(w)));
     const primary = pickPrimaryWindow(shownWins, p.name);
     const primaryId = primary ? winId(primary) : "";
+    // The phone card hides its plan and Log out to stay one row tall; the
+    // panel carries them at every width so nothing depends on the breakpoint.
+    const logoutSlugFor = p.connected ? logoutSlug(p) : null;
+    const logoutLink = logoutSlugFor
+      ? `<button class="link-btn logout-link" data-logout="${esc(logoutSlugFor)}" data-name="${esc(p.name)}" title="Forget this dashboard's stored credentials">log out</button>`
+      : "";
     return `<section class="set-card" data-provider="${esc(p.name)}">
       <div class="set-head">
-        <strong>${esc(p.name)}</strong>
+        <strong>${esc(p.name)}${p.plan ? `<span class="plan-inline">${esc(p.plan)}</span>` : ""}</strong>
         <span class="set-actions">
+          ${logoutLink}
           <button class="link-btn" data-bulk="${esc(p.name)}" data-on="1">all</button>
           <button class="link-btn" data-bulk="${esc(p.name)}" data-on="0">none</button>
           <span class="set-col-label" title="Which metric fills the big dot gauge; the rest become bars">gauge</span>
@@ -612,7 +672,8 @@ async function toggleAutoArm(provider, enabled, input) {
   }
 }
 settingsBody.addEventListener("click", (e) => {
-  const btn = e.target.closest(".link-btn");
+  if (handleLogoutClick(e)) return;
+  const btn = e.target.closest(".link-btn[data-bulk]");
   if (!btn) return;
   const provider = btn.dataset.bulk;
   for (const p of (lastData?.providers || [])) {
@@ -747,13 +808,24 @@ async function logoutOfService(slug, name) {
     alert("Log out failed: " + e.message);
   }
 }
-grid.addEventListener("click", (e) => {
+// Log out lives in the card head on desktop and in the ⚙ panel everywhere;
+// both surfaces share one confirm-and-forget path.
+function handleLogoutClick(e) {
   const out = e.target && e.target.closest && e.target.closest("[data-logout]");
-  if (out) {
-    const name = out.dataset.name || out.dataset.logout;
-    if (!confirm(`Log out of ${name}?\nThe dashboard will forget its stored credentials for this service.`)) return;
-    out.disabled = true;
-    logoutOfService(out.dataset.logout, name).finally(() => { out.disabled = false; });
+  if (!out) return false;
+  const name = out.dataset.name || out.dataset.logout;
+  if (!confirm(`Log out of ${name}?\nThe dashboard will forget its stored credentials for this service.`)) return true;
+  out.disabled = true;
+  logoutOfService(out.dataset.logout, name).finally(() => { out.disabled = false; });
+  return true;
+}
+grid.addEventListener("click", (e) => {
+  if (handleLogoutClick(e)) return;
+  const more = e.target && e.target.closest && e.target.closest("[data-more]");
+  if (more) {
+    const provider = more.dataset.more;
+    setExpanded(provider, !isExpanded(provider));
+    renderGrid();
     return;
   }
   const btn = e.target && e.target.closest && e.target.closest("[data-connect]");
