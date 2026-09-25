@@ -7,6 +7,7 @@ import { createAutoArmer } from "./lib/autoarm.js";
 import { createResetScheduler } from "./lib/reset-scheduler.js";
 import { createUsageCache } from "./lib/usage-cache.js";
 import { createUsageHistory } from "./lib/usage-history.js";
+import { createUsageSampler } from "./lib/usage-sampler.js";
 import { createWindowVerifier } from "./lib/window-verify.js";
 import { codexPing } from "./lib/codex-ping.js";
 import { parseCodexUsageResponse, tokenNeedsRefresh } from "./lib/codex-usage.js";
@@ -544,6 +545,18 @@ function liveUsage(data) {
 let usageFetch = null; // in-flight snapshot fetch
 let usageFetchGen = -1;
 
+// History used to be recorded only when a browser hit /api/usage, so the
+// chart went dark whenever nobody had the page open. The sampler runs the
+// same getUsage() on the page's refresh cadence; it goes through the same
+// 55s cache and in-flight dedupe, so an open tab adds no extra upstream
+// calls beyond what one poller already makes.
+const HISTORY_SAMPLE_MS = 60_000;
+const historySampler = createUsageSampler({
+  sample: () => getUsage(),
+  intervalMs: HISTORY_SAMPLE_MS,
+  onError: (e) => console.error("[history] background sample failed:", e.message),
+});
+
 function getUsage() {
   if (usageCache.data && Date.now() - usageCache.at < USAGE_TTL_MS) return Promise.resolve(liveUsage(usageCache.data));
   if (usageFetch && usageFetchGen === credGeneration) return usageFetch;
@@ -746,4 +759,5 @@ server.listen(PORT, HOST, () => {
   codexScheduler.start();
   if (CLAUDE_ENABLED) claudeScheduler.start();
   windowVerifier.start();
+  historySampler.start();
 });

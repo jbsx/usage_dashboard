@@ -72,7 +72,7 @@ Codex needs special handling here: while unarmed its API reports a *floating* `r
 
 **Daily window verification.** Window identities are derived from their duration, so a plan change reclassifies them — but the stale-serving cache could otherwise keep an old window set alive indefinitely. Once a day a side-effect-free fetch re-checks every provider and invalidates snapshots whose window set actually changed.
 
-**History and the chart.** A sample is written every 60 seconds and pruned to 24 hours. Because the dashboard only samples while it is running, history has holes: a few missed refreshes still draw as one line, but a longer silence is drawn as a **break** rather than a stroke implying usage that was never observed. Curve tangents are scaled per segment, so unevenly spaced samples can't make the line loop backwards in time across a gap.
+**History and the chart.** The server samples every provider every 60 seconds and writes the result to `HISTORY_PATH`, pruned to 24 hours. Sampling is server-side, so history keeps filling while no browser has the page open; an open tab goes through the same cache and adds no extra provider traffic. Because the server only samples while it is running, history has holes: a few missed refreshes still draw as one line, but a longer silence is drawn as a **break** rather than a stroke implying usage that was never observed. Curve tangents are scaled per segment, so unevenly spaced samples can't make the line loop backwards in time across a gap.
 
 ## Tests
 
@@ -93,6 +93,7 @@ lib/               one module per concern, each with tests
   autoarm.js         arming 5-hour windows, with guardrails
   usage-cache.js     stale-serving cache + exponential backoff
   usage-history.js   the rolling 24-hour sample store
+  usage-sampler.js   background tick that fills history with nobody watching
   window-verify.js   daily re-classification pass
   dash-auth.js       dashboard-owned credential + settings store
   claude.js codex-usage.js grok.js   provider parsers

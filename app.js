@@ -367,8 +367,8 @@ const CHART_HOURS = 24;
 // half the range keeps each cycle legible.
 const PHONE_CHART_HOURS = 12;
 const chartHours = () => (isPhone() ? PHONE_CHART_HOURS : CHART_HOURS);
-// The dashboard only samples while it is running, so history has holes. A few
-// missed refreshes still read as one line; a longer silence is drawn as a break
+// The server only samples while it is running, so history has holes. A few
+// missed samples still read as one line; a longer silence is drawn as a break
 // rather than a stroke implying usage we never observed.
 const CHART_GAP_MS = 5 * REFRESH_MS;
 async function migrateClientHistory() {
