@@ -22,6 +22,7 @@ const CHART_PREFS_KEY = "usage-dashboard-chart-prefs";
 const PRIMARY_PREFS_KEY = "usage-dashboard-primary-prefs";
 const EXPANDED_PREFS_KEY = "usage-dashboard-expanded-prefs";
 const LIVE_HISTORY_KEY = "usage-dashboard-live-history";
+const CHART_SPAN_KEY = "usage-dashboard-chart-span";
 let prefs = loadPrefs();
 let chartPrefs = loadChartPrefs();
 let primaryPrefs = loadPrimaryPrefs();
@@ -361,16 +362,27 @@ function renderGrid() {
 }
 
 // ---------- history chart ----------
-// The server keeps seven days; the chart shows twelve hours of it at a time,
-// on every layout, and pans back through the rest. Twelve hours keeps each
-// 5h sawtooth legible even on a phone-width plot.
+// The server keeps seven days; the chart shows twelve hours of it at a time
+// by default, on every layout, and pans back through the rest. Twelve hours
+// keeps each 5h sawtooth legible even on a phone-width plot. Shift+wheel and
+// +/- zoom between an hour and the whole week.
 const CHART_HOURS = 12;
+const DEFAULT_CHART_MS = CHART_HOURS * 3600e3;
+const MIN_CHART_MS = 3600e3;
+const MAX_CHART_MS = 7 * 24 * 3600e3;
+const clampSpan = (ms) => Math.max(MIN_CHART_MS, Math.min(MAX_CHART_MS, ms));
+function loadChartSpan() {
+  let ms;
+  try { ms = Number(JSON.parse(localStorage.getItem(CHART_SPAN_KEY))); } catch { return DEFAULT_CHART_MS; }
+  return Number.isFinite(ms) && ms > 0 ? clampSpan(ms) : DEFAULT_CHART_MS;
+}
 // The server only samples while it is running, so history has holes. A few
 // missed samples still read as one line; a longer silence is drawn as a break
 // rather than a stroke implying usage we never observed.
 const CHART_GAP_MS = 5 * REFRESH_MS;
-// Last drawn plot width, so a drag or wheel can turn pixels into time.
-const chartGeometry = { plotW: 0 };
+// Last drawn layout, so a drag or wheel can turn pixels into time and a zoom
+// knows what span is on screen.
+const chartGeometry = { width: 0, padLeft: 0, plotW: 0, rangeMs: 0 };
 async function migrateClientHistory() {
   let samples;
   try { samples = JSON.parse(localStorage.getItem(LIVE_HISTORY_KEY)); } catch { return; }
@@ -465,12 +477,46 @@ function runPath(run, x, y) {
   return d;
 }
 
+// More samples than pixel columns: keep each column's lowest and highest
+// point, in time order, so a week-wide view keeps the 5h peaks instead of
+// stroking ten thousand points or averaging them away. The run's own first
+// and last points stay too, so a line still stops where sampling stopped.
+function thinRun(run, x) {
+  const out = [];
+  let column = null;
+  let bucket = [];
+  const flush = () => {
+    if (bucket.length <= 2) {
+      out.push(...bucket);
+    } else {
+      let lo = bucket[0];
+      let hi = bucket[0];
+      for (const point of bucket) {
+        if (point[1] < lo[1]) lo = point;
+        if (point[1] > hi[1]) hi = point;
+      }
+      if (lo === hi) out.push(lo);
+      else out.push(...(lo[0] < hi[0] ? [lo, hi] : [hi, lo]));
+    }
+    bucket = [];
+  };
+  for (const point of run) {
+    const at = Math.floor(x(point[0]));
+    if (at !== column) { flush(); column = at; }
+    bucket.push(point);
+  }
+  flush();
+  if (out[0] !== run[0]) out.unshift(run[0]);
+  if (out.at(-1) !== run.at(-1)) out.push(run.at(-1));
+  return out;
+}
+
 // ---------- browsing back through history ----------
 // null while the chart follows live; otherwise the absolute right edge the
 // user panned to, which new samples never move.
 let chartEnd = null;
-const CHART_MS = CHART_HOURS * 3600e3;
-const CHART_STEP_MS = CHART_MS / 2;
+// How much time the plot spans; kept across reloads, which still open live.
+let chartSpanMs = loadChartSpan();
 const chartBack = document.getElementById("chart-back");
 const chartForward = document.getElementById("chart-forward");
 const chartNow = document.getElementById("chart-now");
@@ -482,7 +528,7 @@ const liveEdge = () => Number(lastData?.updatedAt) || Date.now();
 function earliestEnd() {
   const oldest = lastData?.historyOldestAt;
   const now = liveEdge();
-  return oldest == null || !Number.isFinite(Number(oldest)) ? now : Math.min(now, Number(oldest) + CHART_MS);
+  return oldest == null || !Number.isFinite(Number(oldest)) ? now : Math.min(now, Number(oldest) + chartSpanMs);
 }
 // Landing on the live edge re-attaches to live, however it got there.
 function resolveChartEnd(end) {
@@ -491,29 +537,58 @@ function resolveChartEnd(end) {
   return clamped >= now ? null : clamped;
 }
 function setChartEnd(end) {
-  failedSpan = null;
+  historyFailed = false;
   chartEnd = resolveChartEnd(end);
   renderChart();
 }
 const viewEnd = () => chartEnd ?? liveEdge();
-function stepChart(direction) { setChartEnd(viewEnd() + direction * CHART_STEP_MS); }
+function stepChart(direction) { setChartEnd(viewEnd() + direction * chartSpanMs / 2); }
 function jumpChart(where) { setChartEnd(where === "oldest" ? -Infinity : Infinity); }
 // Positive moves forward in time.
 function panChartBy(ms) { setChartEnd(viewEnd() + ms); }
-const CHART_KEYS = { ArrowLeft: () => stepChart(-1), ArrowRight: () => stepChart(1), Home: () => jumpChart("oldest"), End: () => jumpChart("now") };
+
+// fraction: where across the plot the zoom centres, 0 the left edge and 1
+// the right. A live view keeps its right edge on now whatever the fraction,
+// so zooming never drops out of live.
+function setChartSpan(ms, fraction = 0.5) {
+  const onScreenMs = chartGeometry.rangeMs || chartSpanMs;
+  const anchor = viewEnd() - (1 - fraction) * onScreenMs;
+  chartSpanMs = clampSpan(ms);
+  try { localStorage.setItem(CHART_SPAN_KEY, JSON.stringify(chartSpanMs)); } catch {}
+  setChartEnd(chartEnd === null ? Infinity : anchor + (1 - fraction) * chartSpanMs);
+}
+// Below one, zooms in. A short history stretched across the plot shows less
+// than the span, so zooming in starts from what is on screen; zooming out
+// starts from the span, or the stretch would hold it in place.
+function zoomChart(factor, fraction) {
+  const onScreenMs = chartGeometry.rangeMs || chartSpanMs;
+  setChartSpan((factor < 1 ? Math.min(chartSpanMs, onScreenMs) : chartSpanMs) * factor, fraction);
+}
+const KEY_ZOOM_FACTOR = 1.5;
+const CHART_KEYS = {
+  ArrowLeft: () => stepChart(-1),
+  ArrowRight: () => stepChart(1),
+  Home: () => jumpChart("oldest"),
+  End: () => jumpChart("now"),
+  "+": () => zoomChart(1 / KEY_ZOOM_FACTOR),
+  "=": () => zoomChart(1 / KEY_ZOOM_FACTOR),
+  "-": () => zoomChart(KEY_ZOOM_FACTOR),
+  "0": () => setChartSpan(DEFAULT_CHART_MS),
+};
 function chartKey(key) {
   if (!CHART_KEYS[key]) return false;
   CHART_KEYS[key]();
   return true;
 }
 
-// Older samples the page fetched while browsing, and the spans of time those
-// fetches covered. The snapshot itself carries everything since
-// historySince, so the live view never fetches. Kept for the life of the tab.
+// Older samples the page fetched, and the spans of time those fetches
+// covered. The snapshot itself carries everything since historySince, so
+// only a browsed view, or a live one zoomed out past the snapshot, fetches.
+// Kept for the life of the tab.
 const olderSamples = new Map();
 let fetchedSpans = [];
 let historyFetch = null;
-let failedSpan = null;
+let historyFailed = false;
 // An hour either side of the view, so the smoothing and gap detection have
 // neighbours at the edges.
 const CHART_FETCH_MARGIN_MS = 3600e3;
@@ -539,21 +614,22 @@ function addFetchedSpan(from, to) {
   fetchedSpans = merged;
 }
 // Returns true when this view's range failed to load. A failure is not
-// retried until the user pans again, so a down server isn't hammered by
-// every 60s re-render.
+// retried until the user pans or zooms again, so a down server isn't
+// hammered by every 60s re-render; a live view's range slides with each
+// poll, so the failure can't be keyed to the range it was for.
 function ensureHistory(start, end) {
   const unheld = unheldPart(Math.floor(start - CHART_FETCH_MARGIN_MS), Math.ceil(Math.min(end + CHART_FETCH_MARGIN_MS, liveEdge())));
   if (!unheld) return false;
+  if (historyFailed) return true;
+  if (historyFetch) return false;
   const [from, to] = unheld;
-  const key = `${from}-${to}`;
-  if (historyFetch || failedSpan === key) return failedSpan === key;
   historyFetch = fetch(`/api/history?from=${from}&to=${to}`)
     .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
     .then((body) => {
       for (const sample of body.samples || []) olderSamples.set(sample.sampledAt, sample);
       addFetchedSpan(from, to);
     })
-    .catch(() => { failedSpan = key; })
+    .catch(() => { historyFailed = true; })
     .finally(() => {
       historyFetch = null;
       renderChart();
@@ -571,11 +647,26 @@ function agoWords(ms) {
   if (hours < 48) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
   return `${Math.round(ms / 86400e3)} days ago`;
 }
+// Zoom is smooth, so hour and day counts keep one decimal below ten, and a
+// count a hair under a whole number reads whole ("3", not "3.0").
+const roundCount = (count) => (count >= 10 ? Math.round(count) : Number(count.toFixed(1)));
+// A span in words: "30 minutes", "4.5 hours", "3 days".
+function spanWords(ms) {
+  const unit = ms < 3600e3 ? [60e3, "minute"] : ms < 48 * 3600e3 ? [3600e3, "hour"] : [86400e3, "day"];
+  const count = unit[1] === "minute" ? Math.round(ms / unit[0]) : roundCount(ms / unit[0]);
+  return `${count} ${unit[1]}${count === 1 ? "" : "s"}`;
+}
 
 function renderChartNav(browsing) {
   if (chartNow) chartNow.hidden = !browsing;
   if (chartForward) chartForward.disabled = !browsing;
   if (chartBack) chartBack.disabled = viewEnd() <= earliestEnd();
+  const step = spanWords(chartSpanMs / 2);
+  for (const [button, label] of [[chartBack, `Back ${step}`], [chartForward, `Forward ${step}`]]) {
+    if (!button) continue;
+    button.title = label;
+    button.setAttribute?.("aria-label", label);
+  }
   if (chartLive) {
     chartLive.className = browsing ? "live-mark browsing" : "live-mark";
     chartLive.innerHTML = browsing ? "<i></i> browsing" : "<i></i> live";
@@ -612,19 +703,22 @@ function renderChart() {
   const end = browsing ? chartEnd : now;
   const visibleSeries = allSeries.filter((series) => chartEnabled(series.id, series));
   const visibleTimes = [...new Set(visibleSeries.flatMap((series) => series.points.map(([time]) => time)))]
-    .filter((time) => time >= end - CHART_MS && time <= end)
+    .filter((time) => time >= end - chartSpanMs && time <= end)
     .sort((a, b) => a - b);
   // A history shorter than the window stretches to fill the plot. Once there
-  // is older history to pan into, the window is always exactly twelve hours,
+  // is older history to pan into, the window is always exactly the span,
   // so a drag from live tracks the cursor at the same scale it will pan at.
+  // The fetch covers the whole span even while stretched: a live view zoomed
+  // out past the snapshot has only the snapshot's samples until it lands.
+  const unloaded = ensureHistory(end - chartSpanMs, end) ? " · couldn't load this range" : "";
   const stretch = !browsing && earliestEnd() >= now && visibleTimes.length > 1;
-  const start = stretch ? visibleTimes[0] : end - CHART_MS;
+  const start = stretch ? visibleTimes[0] : end - chartSpanMs;
   const rangeMs = end - start;
-  const unloaded = browsing && ensureHistory(start, end) ? " · couldn't load this range" : "";
+  Object.assign(chartGeometry, { width, padLeft: pad.left, rangeMs });
   if (chartSubtitle) {
     chartSubtitle.textContent = browsing
       ? `${clockLabel(start)} – ${clockLabel(end)} · ${agoWords(now - end)}${unloaded} · percentage used`
-      : `Rolling history, up to ${CHART_HOURS} hours · percentage used`;
+      : `Rolling history, up to ${spanWords(chartSpanMs)}${unloaded} · percentage used`;
   }
   const x = (time) => pad.left + ((time - start) / rangeMs) * plotW;
   const peak = Math.max(0, ...visibleSeries.flatMap((series) =>
@@ -635,11 +729,15 @@ function renderChart() {
   for (let pct = 0; pct <= axisTop + 0.001; pct += step) ticks.push(pct);
   const y = (pct) => pad.top + (1 - pct / axisTop) * plotH;
   const grid = ticks.map((pct) => `<g><line x1="${pad.left}" y1="${y(pct)}" x2="${width - pad.right}" y2="${y(pct)}"/><text x="${pad.left - 10}" y="${y(pct) + 4}" text-anchor="end">${pct}</text></g>`).join("");
+  // Past two days, hour counts get long ("−168h"), so every label reads in days.
+  const inDays = rangeMs > 48 * 3600e3;
   const agoLabel = (ms) => {
     if (!ms) return "now";
+    if (inDays) {
+      return `−${roundCount(ms / 86400e3)}d`;
+    }
     if (ms >= 3600e3) {
-      const hours = ms / 3600e3;
-      return `−${hours >= 10 || Number.isInteger(hours) ? Math.round(hours) : hours.toFixed(1)}h`;
+      return `−${roundCount(ms / 3600e3)}h`;
     }
     if (ms >= 60000) return `−${Math.round(ms / 60000)}m`;
     return `−${Math.max(1, Math.round(ms / 1000))}s`;
@@ -659,14 +757,14 @@ function renderChart() {
     const points = series.points.filter(([time]) => time >= start - CHART_GAP_MS && time <= end + CHART_GAP_MS).sort((a, b) => a[0] - b[0]);
     const inView = points.filter(([time]) => time >= start && time <= end);
     if (!inView.length) return "";
-    const d = contiguousRuns(points).map((run) => runPath(run, x, y)).join(" ");
+    const d = contiguousRuns(points).map((run) => runPath(thinRun(run, x), x, y)).join(" ");
     const last = inView.at(-1);
     const dash = String(series.key).toLowerCase().startsWith("5h") ? "" : ` stroke-dasharray="${index % 2 ? "3 5" : "9 5"}"`;
     return `<path class="usage-line" d="${d}" stroke="${providerColor(series.provider)}"${dash} clip-path="url(#chart-clip)"><title>${esc(series.provider)} ${esc(series.label)}: ${Math.round(last[1])}%</title></path>`;
   }).join("");
   const label = browsing
     ? `Provider usage percentages from ${clockLabel(start)} to ${clockLabel(end)}`
-    : `Provider usage percentages over the last ${CHART_HOURS} hours`;
+    : `Provider usage percentages over the last ${spanWords(chartSpanMs)}`;
   // The clip leaves room above and below for the stroke's width and round caps.
   const clip = `<clipPath id="chart-clip"><rect x="${pad.left}" y="0" width="${plotW}" height="${height}"/></clipPath>`;
   chartPlot.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(label)}"><defs>${clip}</defs><g class="chart-grid">${grid}${times}</g>${paths}</svg>`;
@@ -682,8 +780,10 @@ chartBack?.addEventListener("click", () => stepChart(-1));
 chartForward?.addEventListener("click", () => stepChart(1));
 chartNow?.addEventListener("click", () => jumpChart("now"));
 chartPlot?.addEventListener("keydown", (event) => {
-  // Alt+Left is the browser's Back; only bare keys belong to the chart.
-  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+  // Alt+Left is the browser's Back; only bare keys belong to the chart,
+  // except the shift most layouts need to type "+".
+  if (event.altKey || event.ctrlKey || event.metaKey) return;
+  if (event.shiftKey && event.key !== "+") return;
   if (chartKey(event.key)) event.preventDefault();
 });
 
@@ -699,7 +799,7 @@ function panToOnNextFrame(end) {
     setChartEnd(panTarget);
   });
 }
-const msPerPixel = () => (chartGeometry.plotW ? CHART_MS / chartGeometry.plotW : 0);
+const msPerPixel = () => (chartGeometry.plotW ? chartSpanMs / chartGeometry.plotW : 0);
 let chartDrag = null;
 chartPlot?.addEventListener("pointerdown", (event) => {
   if (event.button !== 0 || !msPerPixel()) return;
@@ -719,15 +819,52 @@ const endChartDrag = (event) => {
 };
 chartPlot?.addEventListener("pointerup", endChartDrag);
 chartPlot?.addEventListener("pointercancel", endChartDrag);
-// Only a mostly-horizontal wheel pans; a vertical one scrolls the page.
+const wheelPixels = (event, delta) => delta * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? chartGeometry.plotW : 1);
+// A 100px wheel notch zooms by about a fifth. Scrolling up (a negative delta)
+// zooms in. Chrome and Safari report shift+wheel on the horizontal axis, so
+// the zoom reads whichever axis moved.
+const ZOOM_PER_PIXEL = 0.002;
+function wheelZoomFactor(event) {
+  const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+  return Math.exp(wheelPixels(event, delta) * ZOOM_PER_PIXEL);
+}
+// Where across the plot a pointer sits, 0 to 1; the SVG scales to the box.
+function plotFraction(clientX) {
+  const rect = chartPlot.getBoundingClientRect?.();
+  if (!rect || !rect.width || !chartGeometry.plotW) return 0.5;
+  const svgX = (clientX - rect.left) * (chartGeometry.width / rect.width);
+  return Math.max(0, Math.min(1, (svgX - chartGeometry.padLeft) / chartGeometry.plotW));
+}
+// Wheel events come faster than frames too; their factors multiply into one
+// zoom per frame, centred where the pointer last was.
+let zoomFrame = null;
+let zoomFactor = 1;
+let zoomAt = 0.5;
+// Shift+wheel zooms. Ctrl, which a trackpad pinch also sets, stays the
+// browser's page zoom even with shift held. Otherwise only a
+// mostly-horizontal wheel pans; a vertical one scrolls the page.
 chartPlot?.addEventListener("wheel", (event) => {
+  if (event.ctrlKey) return;
+  if (event.shiftKey) {
+    event.preventDefault();
+    zoomFactor *= wheelZoomFactor(event);
+    zoomAt = plotFraction(event.clientX);
+    if (!zoomFrame) {
+      zoomFrame = requestAnimationFrame(() => {
+        zoomFrame = null;
+        const factor = zoomFactor;
+        zoomFactor = 1;
+        zoomChart(factor, zoomAt);
+      });
+    }
+    return;
+  }
   if (Math.abs(event.deltaX) <= Math.abs(event.deltaY) || !msPerPixel()) return;
   // Already at now with nowhere further to go: leave the gesture to the
   // browser, whose trackpad swipe may mean Back.
   if (event.deltaX > 0 && chartEnd === null && !panFrame) return;
   event.preventDefault();
-  const pixels = event.deltaX * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? chartGeometry.plotW : 1);
-  panToOnNextFrame((panFrame ? panTarget : viewEnd()) + pixels * msPerPixel());
+  panToOnNextFrame((panFrame ? panTarget : viewEnd()) + wheelPixels(event, event.deltaX) * msPerPixel());
 }, { passive: false });
 
 chartLegend?.addEventListener("change", (event) => {

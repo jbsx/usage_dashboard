@@ -42,7 +42,7 @@ function loadCardRenderer(storedPrefsJson, storedChartPrefsJson, sharedStorage =
   if (options.phone) context.matchMedia = () => ({ matches: true, addEventListener() {} });
   const source = fs.readFileSync(new URL("../app.js", import.meta.url), "utf8");
   vm.runInNewContext(
-    source + "\nglobalThis.__api = { cardHtml, renderGrid, renderChart, renderSettings, shortCountdown, setData: (d) => { lastData = d; }, gridEl: grid, chartLegend, chartPlot, chartSubtitle, settingsBody, stepChart, jumpChart, panChartBy, chartKey, chartBack: document.getElementById('chart-back'), chartForward: document.getElementById('chart-forward'), chartNow: document.getElementById('chart-now'), chartLive: document.getElementById('chart-live') };",
+    source + "\nglobalThis.__api = { cardHtml, renderGrid, renderChart, renderSettings, shortCountdown, setData: (d) => { lastData = d; }, gridEl: grid, chartLegend, chartPlot, chartSubtitle, settingsBody, stepChart, jumpChart, panChartBy, chartKey, zoomChart, wheelZoomFactor, chartBack: document.getElementById('chart-back'), chartForward: document.getElementById('chart-forward'), chartNow: document.getElementById('chart-now'), chartLive: document.getElementById('chart-live') };",
     context,
   );
   return context.__api;
@@ -714,7 +714,7 @@ function samplesBetween(now, fromAgo, toAgo, usedPct = 30) {
 }
 // A renderer whose /api/usage poll never settles (so it can't overwrite the
 // fixture) and whose /api/history answers from `older`, recording each ask.
-function browsingRenderer({ now = 200 * HOUR, oldestAgo = 48, older = [] } = {}) {
+function browsingRenderer({ now = 200 * HOUR, oldestAgo = 48, older = [], storage = new Map() } = {}) {
   const asked = [];
   const fetchImpl = async (url) => {
     if (String(url).startsWith("/api/history?")) {
@@ -726,7 +726,7 @@ function browsingRenderer({ now = 200 * HOUR, oldestAgo = 48, older = [] } = {})
     }
     return new Promise(() => {});
   };
-  const api = loadCardRenderer(undefined, undefined, new Map(), fetchImpl);
+  const api = loadCardRenderer(undefined, undefined, storage, fetchImpl);
   api.setData({
     updatedAt: now,
     providers: claudeAt(now, 30).providers,
@@ -890,4 +890,163 @@ test("a fetch asks only for the part of the view not already held", async () => 
   view.stepChart(-1); // needs 25h..11h ago; 19h onwards is held
   await settle();
   assert.deepEqual(view.asked.at(-1), { from: now - 25 * HOUR, to: now - 19 * HOUR });
+});
+
+// ---------- zooming ----------
+test("zooming in on the live view narrows the span and stays live", () => {
+  const view = browsingRenderer();
+  view.zoomChart(0.5, 0.2);
+
+  assert.equal(view.chartNow.hidden, true, "still live");
+  assert.match(view.chartLive.innerHTML, /live/);
+  assert.equal(view.chartSubtitle.textContent, "Rolling history, up to 6 hours · percentage used");
+  assert.match(view.chartPlot.innerHTML, /−6h/);
+  assert.doesNotMatch(view.chartPlot.innerHTML, /−12h/);
+  assert.match(view.chartPlot.innerHTML, /over the last 6 hours/);
+  // Paging follows the zoom: half of six hours.
+  assert.equal(view.chartBack.title, "Back 3 hours");
+  view.stepChart(-1);
+  assert.match(view.chartSubtitle.textContent, /3 hours ago/);
+});
+
+test("zooming a browsed view keeps the time under the cursor where it was", () => {
+  const now = 200 * HOUR;
+  const view = browsingRenderer({ now });
+  view.stepChart(-1); // now-18h .. now-6h
+  // The middle of the plot is 12h ago; halving the span around it gives 15h..9h ago.
+  view.zoomChart(0.5, 0.5);
+  assert.match(view.chartSubtitle.textContent, /9 hours ago/);
+  assert.match(view.chartLive.innerHTML, /browsing/);
+});
+
+test("zoom stops at one hour and at the seven days the server keeps", () => {
+  const view = browsingRenderer();
+  view.zoomChart(0.001);
+  assert.equal(view.chartSubtitle.textContent, "Rolling history, up to 1 hour · percentage used");
+  assert.match(view.chartPlot.innerHTML, /−45m/);
+  view.zoomChart(1e6);
+  assert.match(view.chartSubtitle.textContent, /up to 7 days/);
+  view.zoomChart(2);
+  assert.match(view.chartSubtitle.textContent, /up to 7 days/);
+});
+
+test("a live view wider than the snapshot fetches the rest and labels its axis in days", async () => {
+  const now = 200 * HOUR;
+  const view = browsingRenderer({ now, oldestAgo: 100 });
+  view.zoomChart(6); // 72 hours
+  await settle();
+
+  assert.deepEqual(view.asked, [{ from: now - 73 * HOUR, to: now - 13 * HOUR }]);
+  assert.match(view.chartPlot.innerHTML, /−3d/);
+  assert.match(view.chartPlot.innerHTML, /−1\.5d/);
+  assert.doesNotMatch(view.chartPlot.innerHTML, /−72h|−36h/);
+  assert.match(view.chartSubtitle.textContent, /up to 3 days/);
+});
+
+test("a span a hair under a round number labels it round, not with a trailing .0", () => {
+  const view = browsingRenderer({ oldestAgo: 100 });
+  view.zoomChart(71.99 / 12);
+  assert.match(view.chartPlot.innerHTML, />−3d</);
+  assert.doesNotMatch(view.chartPlot.innerHTML, /\.0[dh]</);
+  view.zoomChart(5.999 / 71.99);
+  assert.match(view.chartPlot.innerHTML, />−6h</);
+  assert.doesNotMatch(view.chartPlot.innerHTML, /\.0[dh]</);
+});
+
+test("+ and - zoom from the keyboard and 0 resets to twelve hours", () => {
+  const view = browsingRenderer();
+  assert.equal(view.chartKey("+"), true);
+  assert.match(view.chartSubtitle.textContent, /up to 8 hours/);
+  assert.equal(view.chartKey("-"), true);
+  assert.match(view.chartSubtitle.textContent, /up to 12 hours/);
+  view.chartKey("-");
+  assert.match(view.chartSubtitle.textContent, /up to 18 hours/);
+  assert.equal(view.chartKey("0"), true);
+  assert.match(view.chartSubtitle.textContent, /up to 12 hours/);
+  view.chartKey("=");
+  assert.match(view.chartSubtitle.textContent, /up to 8 hours/, "= is + without shift");
+});
+
+test("the zoom level survives a reload, which still opens live", () => {
+  const storage = new Map();
+  const first = browsingRenderer({ storage });
+  first.stepChart(-1);
+  first.zoomChart(0.5);
+
+  const reloaded = browsingRenderer({ storage });
+  assert.equal(reloaded.chartSubtitle.textContent, "Rolling history, up to 6 hours · percentage used");
+  assert.equal(reloaded.chartNow.hidden, true);
+});
+
+test("scrolling up zooms in, whichever axis the browser reports a shifted wheel on", () => {
+  const { wheelZoomFactor } = loadCardRenderer();
+  const up = wheelZoomFactor({ deltaX: 0, deltaY: -100, deltaMode: 0 });
+  assert.ok(up < 1);
+  // Chrome and Safari turn shift+wheel into a horizontal delta.
+  assert.equal(wheelZoomFactor({ deltaX: -100, deltaY: 0, deltaMode: 0 }), up);
+  assert.ok(wheelZoomFactor({ deltaX: 0, deltaY: 100, deltaMode: 0 }) > 1);
+  assert.ok(wheelZoomFactor({ deltaX: 0, deltaY: -3, deltaMode: 1 }) < 1, "line-mode wheels zoom too");
+});
+
+test("a week of per-minute samples is thinned to at most two points per pixel column", () => {
+  const api = loadCardRenderer();
+  const now = 400 * HOUR;
+  const history = [];
+  for (let at = now - 7 * 24 * HOUR; at <= now; at += 60e3) history.push(claudeAt(at, 20 + ((at / 60e3) % 300) / 5));
+  api.setData({ updatedAt: now, providers: claudeAt(now, 30).providers, history, historySince: now - 7 * 24 * HOUR, historyOldestAt: now - 7 * 24 * HOUR });
+  api.zoomChart(1e6);
+
+  const d = api.chartPlot.innerHTML.match(/ d="([^"]+)"/)[1];
+  const segments = (d.match(/C/g) || []).length;
+  const plotW = 1000 - 36 - 12;
+  assert.ok(segments <= 2 * plotW, `${segments} segments for ${plotW} columns`);
+  // The sawtooth still reaches its peaks rather than averaging to the middle.
+  assert.match(api.chartPlot.innerHTML, />75<\/text>/);
+});
+
+test("a zoomed-out live view whose older range failed is not re-asked on every poll", async () => {
+  const now = 200 * HOUR;
+  const asked = [];
+  const fetchImpl = async (url) => {
+    if (!String(url).startsWith("/api/history?")) return new Promise(() => {});
+    asked.push(url);
+    return { ok: false, status: 500, json: async () => ({}) };
+  };
+  const view = loadCardRenderer(undefined, undefined, new Map(), fetchImpl);
+  const poll = (at) => view.setData({ updatedAt: at, providers: claudeAt(at, 30).providers, history: samplesBetween(at, 13, 0), historySince: at - 13 * HOUR, historyOldestAt: now - 100 * HOUR });
+  poll(now);
+  view.zoomChart(2); // 24 hours, past the 13-hour snapshot
+  await settle();
+  assert.equal(asked.length, 1);
+  assert.match(view.chartSubtitle.textContent, /couldn't load/);
+
+  // The next poll slides the live range, which must not count as a new ask.
+  poll(now + 60e3);
+  view.renderChart();
+  await settle();
+  assert.equal(asked.length, 1);
+  assert.match(view.chartSubtitle.textContent, /couldn't load/);
+
+  view.zoomChart(1.1); // the user acting again is what earns a retry
+  await settle();
+  assert.equal(asked.length, 2);
+});
+
+test("thinning keeps where a run ends, so the line stops on its last sample before an outage", () => {
+  const api = loadCardRenderer();
+  const now = 400 * HOUR;
+  const first = now - 7 * 24 * HOUR;
+  const stop = now - 2 * HOUR; // the server went down two hours ago
+  const history = [];
+  for (let at = first; at <= stop; at += 60e3) history.push(claudeAt(at, 20 + ((at / 60e3) % 7)));
+  // The last sample sits mid-range in its pixel column: neither its min nor its max.
+  history[history.length - 1] = claudeAt(stop, 23);
+  api.setData({ updatedAt: now, providers: claudeAt(now, 23).providers, history, historySince: first, historyOldestAt: first });
+  api.zoomChart(1e6);
+
+  const d = api.chartPlot.innerHTML.match(/ d="([^"]+)"/)[1];
+  const runEnd = d.split("M")[1].trim().split(" ").at(-1);
+  const plotW = 1000 - 36 - 12;
+  const x = 36 + ((stop - first) / (now - first)) * plotW;
+  assert.equal(runEnd.split(",")[0], x.toFixed(1));
 });
