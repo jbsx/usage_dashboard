@@ -42,7 +42,7 @@ function loadCardRenderer(storedPrefsJson, storedChartPrefsJson, sharedStorage =
   if (options.phone) context.matchMedia = () => ({ matches: true, addEventListener() {} });
   const source = fs.readFileSync(new URL("../app.js", import.meta.url), "utf8");
   vm.runInNewContext(
-    source + "\nglobalThis.__api = { cardHtml, renderGrid, renderChart, renderSettings, shortCountdown, setData: (d) => { lastData = d; }, gridEl: grid, chartLegend, chartPlot, chartSubtitle, settingsBody };",
+    source + "\nglobalThis.__api = { cardHtml, renderGrid, renderChart, renderSettings, shortCountdown, setData: (d) => { lastData = d; }, gridEl: grid, chartLegend, chartPlot, chartSubtitle, settingsBody, stepChart, jumpChart, panChartBy, chartKey, chartBack: document.getElementById('chart-back'), chartForward: document.getElementById('chart-forward'), chartNow: document.getElementById('chart-now'), chartLive: document.getElementById('chart-live') };",
     context,
   );
   return context.__api;
@@ -443,18 +443,20 @@ test("phone countdowns keep two units; desktop keeps all of them", () => {
   assert.match(loadCardRenderer().shortCountdown(far), /^10d 23h 59m$/);
 });
 
-test("phone chart covers 12 hours instead of 24", () => {
-  const phone = loadCardRenderer(undefined, undefined, new Map(), undefined, { phone: true });
-  const now = 48 * 3600e3;
-  const provider = (usedPct) => [{ name: "Claude", windows: [{ key: "5h", label: "5-Hour", usedPct }] }];
-  phone.setData({ updatedAt: now, providers: provider(35), history: [{ sampledAt: now - 20 * 3600e3, providers: provider(20) }] });
-  phone.renderChart();
+test("the chart shows the last 12 hours on desktop and phone alike", () => {
+  for (const phone of [false, true]) {
+    const api = loadCardRenderer(undefined, undefined, new Map(), undefined, { phone });
+    const now = 48 * 3600e3;
+    const provider = (usedPct) => [{ name: "Claude", windows: [{ key: "5h", label: "5-Hour", usedPct }] }];
+    api.setData({ updatedAt: now, providers: provider(35), history: [{ sampledAt: now - 20 * 3600e3, providers: provider(20) }] });
+    api.renderChart();
 
-  // The 20-hour-old sample falls outside the range, so the axis spans the default 12 hours.
-  assert.match(phone.chartPlot.innerHTML, /aria-label="Provider usage percentages over the last 12 hours"/);
-  assert.match(phone.chartPlot.innerHTML, /−12h/);
-  assert.doesNotMatch(phone.chartPlot.innerHTML, /−24h|−20h/);
-  assert.equal(phone.chartSubtitle.textContent, "Rolling history, up to 12 hours · percentage used");
+    // The 20-hour-old sample falls outside the range, so the axis spans the default 12 hours.
+    assert.match(api.chartPlot.innerHTML, /aria-label="Provider usage percentages over the last 12 hours"/);
+    assert.match(api.chartPlot.innerHTML, /−12h/);
+    assert.doesNotMatch(api.chartPlot.innerHTML, /−24h|−20h/);
+    assert.equal(api.chartSubtitle.textContent, "Rolling history, up to 12 hours · percentage used");
+  }
 });
 
 test("settings panel carries plan and Log out so the phone card can drop them", () => {
@@ -498,7 +500,7 @@ test("history chart defaults to 5h series and scales the axis to the visible pea
   assert.match(chartPlot.innerHTML, />50<\/text>/);
   assert.match(chartPlot.innerHTML, />0<\/text>/);
   assert.doesNotMatch(chartPlot.innerHTML, />100<\/text>/);
-  assert.match(chartPlot.innerHTML, /−24h/);
+  assert.match(chartPlot.innerHTML, /−12h/);
 });
 
 test("axis coarsens to 25-point steps once the visible peak passes 50", () => {
@@ -652,7 +654,7 @@ test("an outage breaks the line instead of interpolating across it", () => {
     providers: [{ name: "Claude", windows: [{ key: "5h", label: "5-Hour", usedPct }] }],
   });
   const history = [];
-  for (let i = 0; i < 20; i++) history.push(sample(now - 16 * 3600e3 + i * 60e3, 10));
+  for (let i = 0; i < 20; i++) history.push(sample(now - 9 * 3600e3 + i * 60e3, 10));
   for (let i = 0; i < 20; i++) history.push(sample(now - 5 * 60e3 + i * 15e3, 40));
   setData({
     updatedAt: now,
@@ -699,4 +701,193 @@ test("a lone sample surrounded by outages still renders as a visible dot", () =>
   assert.equal((d.match(/M/g) || []).length, 2);
   assert.doesNotMatch(d, /C/);
   assert.match(d, /M[\d.]+,[\d.]+L[\d.]+,[\d.]+/);
+});
+
+// ---------- browsing back through history ----------
+const HOUR = 3600e3;
+const claudeAt = (sampledAt, usedPct) => ({ sampledAt, providers: [{ name: "Claude", windows: [{ key: "5h", label: "5-Hour", usedPct }] }] });
+// Samples every ten minutes from `fromAgo` hours back to `toAgo` hours back.
+function samplesBetween(now, fromAgo, toAgo, usedPct = 30) {
+  const out = [];
+  for (let at = now - fromAgo * HOUR; at <= now - toAgo * HOUR; at += 10 * 60e3) out.push(claudeAt(at, usedPct));
+  return out;
+}
+// A renderer whose /api/usage poll never settles (so it can't overwrite the
+// fixture) and whose /api/history answers from `older`, recording each ask.
+function browsingRenderer({ now = 200 * HOUR, oldestAgo = 48, older = [] } = {}) {
+  const asked = [];
+  const fetchImpl = async (url) => {
+    if (String(url).startsWith("/api/history?")) {
+      const params = new URLSearchParams(String(url).split("?")[1]);
+      const from = Number(params.get("from"));
+      const to = Number(params.get("to"));
+      asked.push({ from, to });
+      return { ok: true, json: async () => ({ samples: older.filter((s) => s.sampledAt >= from && s.sampledAt <= to), oldestAt: now - oldestAgo * HOUR }) };
+    }
+    return new Promise(() => {});
+  };
+  const api = loadCardRenderer(undefined, undefined, new Map(), fetchImpl);
+  api.setData({
+    updatedAt: now,
+    providers: claudeAt(now, 30).providers,
+    history: samplesBetween(now, 13, 0),
+    historySince: now - 13 * HOUR,
+    historyOldestAt: now - oldestAgo * HOUR,
+  });
+  api.renderChart();
+  return { ...api, asked, now };
+}
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+test("stepping back leaves live: absolute times, a browsing mark, and a Now button", () => {
+  const view = browsingRenderer();
+  assert.equal(view.chartNow.hidden, true);
+  assert.match(view.chartLive.innerHTML, /live/);
+
+  view.stepChart(-1);
+
+  assert.equal(view.chartNow.hidden, false);
+  assert.match(view.chartLive.innerHTML, /browsing/);
+  assert.doesNotMatch(view.chartLive.innerHTML, /live/);
+  assert.match(view.chartSubtitle.textContent, /6 hours ago/);
+  assert.doesNotMatch(view.chartSubtitle.textContent, /Rolling/);
+  // Relative "−6h" labels would read as hours before now, not before the right edge.
+  assert.doesNotMatch(view.chartPlot.innerHTML, /−\d|>now</);
+  assert.equal(view.chartForward.disabled, false);
+});
+
+test("browsing past the embedded history asks the server for that range once, then draws it", async () => {
+  const now = 200 * HOUR;
+  const view = browsingRenderer({ now, older: samplesBetween(now, 30, 13, 77) });
+
+  view.stepChart(-1); // right edge 6h ago, left edge 18h ago: past the 13h the snapshot carries
+  await settle();
+
+  // The view plus an hour each side, less the 13 hours the snapshot already holds.
+  assert.deepEqual(view.asked, [{ from: now - 19 * HOUR, to: now - 13 * HOUR }]);
+  assert.match(view.chartPlot.innerHTML, /class="usage-line"/);
+  // 77% only exists in the fetched samples; the axis scales to it.
+  assert.match(view.chartPlot.innerHTML, />100<\/text>/);
+
+  view.stepChart(1);
+  view.stepChart(-1);
+  await settle();
+  assert.equal(view.asked.length, 1, "a range already fetched is served from memory");
+});
+
+test("the live view never asks for history beyond the snapshot", async () => {
+  const view = browsingRenderer();
+  view.renderChart();
+  await settle();
+  assert.deepEqual(view.asked, []);
+});
+
+test("a failed range says so, retries on the next pan, and never mislabels a loaded view", async () => {
+  const now = 200 * HOUR;
+  let failing = true;
+  const asked = [];
+  const fetchImpl = async (url) => {
+    if (!String(url).startsWith("/api/history?")) return new Promise(() => {});
+    asked.push(url);
+    if (failing) return { ok: false, status: 500, json: async () => ({}) };
+    return { ok: true, json: async () => ({ samples: samplesBetween(now, 30, 13), oldestAt: now - 48 * HOUR }) };
+  };
+  const view = loadCardRenderer(undefined, undefined, new Map(), fetchImpl);
+  view.setData({ updatedAt: now, providers: claudeAt(now, 30).providers, history: samplesBetween(now, 13, 0), historySince: now - 13 * HOUR, historyOldestAt: now - 48 * HOUR });
+
+  view.stepChart(-1);
+  await settle();
+  assert.match(view.chartSubtitle.textContent, /couldn't load/);
+  assert.equal(asked.length, 1, "the same failed range is not retried in a loop");
+
+  // Back to a view the snapshot covers: no failure note there.
+  view.stepChart(1);
+  assert.doesNotMatch(view.chartSubtitle.textContent, /couldn't load/);
+
+  failing = false;
+  view.stepChart(-1);
+  await settle();
+  assert.equal(asked.length, 2);
+  assert.doesNotMatch(view.chartSubtitle.textContent, /couldn't load/);
+});
+
+test("Home stops the left edge on the oldest sample and disables going further back", () => {
+  const now = 200 * HOUR;
+  const view = browsingRenderer({ now, oldestAgo: 40 });
+  assert.equal(view.chartBack.disabled, false);
+
+  assert.equal(view.chartKey("Home"), true);
+  // Left edge on the sample 40h ago, so the right edge is 28h ago.
+  assert.match(view.chartSubtitle.textContent, /28 hours ago/);
+  assert.equal(view.chartBack.disabled, true);
+
+  view.stepChart(-1);
+  assert.match(view.chartSubtitle.textContent, /28 hours ago/, "nothing older to page into");
+});
+
+test("a history shorter than the window has nowhere to go back to", () => {
+  const view = browsingRenderer({ oldestAgo: 10 });
+  assert.equal(view.chartBack.disabled, true);
+  view.stepChart(-1);
+  assert.equal(view.chartNow.hidden, true, "still live");
+});
+
+test("stepping or dragging onto now re-attaches to live; End jumps there", () => {
+  const view = browsingRenderer();
+  view.stepChart(-1);
+  view.stepChart(1);
+  assert.equal(view.chartNow.hidden, true);
+  assert.match(view.chartLive.innerHTML, /live/);
+
+  view.stepChart(-1);
+  view.panChartBy(10 * HOUR); // overshoots now and clamps to it
+  assert.equal(view.chartNow.hidden, true);
+  assert.equal(view.chartForward.disabled, true);
+
+  view.chartKey("ArrowLeft");
+  view.chartKey("ArrowLeft");
+  assert.match(view.chartSubtitle.textContent, /12 hours ago/);
+  view.chartKey("End");
+  assert.match(view.chartSubtitle.textContent, /Rolling history/);
+  assert.equal(view.chartKey("a"), false, "unhandled keys fall through");
+});
+
+test("a new poll slides the live view but leaves a browsed view where it is", () => {
+  const now = 200 * HOUR;
+  const view = browsingRenderer({ now });
+  view.stepChart(-1);
+  const browsed = view.chartSubtitle.textContent;
+  const range = browsed.split(" · ")[0];
+
+  view.setData({ updatedAt: now + HOUR, providers: claudeAt(now + HOUR, 30).providers, history: samplesBetween(now + HOUR, 13, 0), historySince: now - 12 * HOUR, historyOldestAt: now - 48 * HOUR });
+  view.renderChart();
+
+  assert.equal(view.chartSubtitle.textContent.split(" · ")[0], range, "same absolute range");
+  assert.match(view.chartSubtitle.textContent, /7 hours ago/);
+});
+
+test("a short drag back reads in minutes, not '0 hours ago'", () => {
+  const view = browsingRenderer();
+  view.panChartBy(-20 * 60e3);
+  assert.match(view.chartSubtitle.textContent, /20 minutes ago/);
+});
+
+test("with older history to browse, the live view is a fixed 12 hours even if the enabled lines start later", () => {
+  const now = 200 * HOUR;
+  const view = browsingRenderer({ now });
+  // Only the last three hours carry the enabled series.
+  view.setData({ updatedAt: now, providers: claudeAt(now, 30).providers, history: samplesBetween(now, 3, 0), historySince: now - 13 * HOUR, historyOldestAt: now - 48 * HOUR });
+  view.renderChart();
+  assert.match(view.chartPlot.innerHTML, /−12h/, "not stretched to −3h, so a drag tracks the cursor");
+});
+
+test("a fetch asks only for the part of the view not already held", async () => {
+  const now = 200 * HOUR;
+  const view = browsingRenderer({ now, older: samplesBetween(now, 40, 13, 50) });
+  view.stepChart(-1); // needs 19h..5h ago; the snapshot holds 13h..now
+  await settle();
+  assert.deepEqual(view.asked.at(-1), { from: now - 19 * HOUR, to: now - 13 * HOUR });
+  view.stepChart(-1); // needs 25h..11h ago; 19h onwards is held
+  await settle();
+  assert.deepEqual(view.asked.at(-1), { from: now - 25 * HOUR, to: now - 19 * HOUR });
 });

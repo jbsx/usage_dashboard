@@ -21,12 +21,17 @@
       <div class="chart-head">
         <div>
           <h2 id="chart-title">Usage history</h2>
-          <p id="chart-subtitle">Rolling history, up to 24 hours · percentage used</p>
+          <p id="chart-subtitle">Rolling history, up to 12 hours · percentage used</p>
         </div>
-        <span class="live-mark"><i></i> live</span>
+        <div class="chart-nav">
+          <button id="chart-back" title="Back 6 hours" aria-label="Back 6 hours">‹</button>
+          <button id="chart-now" title="Back to live" hidden>Now</button>
+          <button id="chart-forward" title="Forward 6 hours" aria-label="Forward 6 hours" disabled>›</button>
+          <span id="chart-live" class="live-mark"><i></i> live</span>
+        </div>
       </div>
       <div id="chart-legend" class="chart-legend" aria-label="Chart series"></div>
-      <div id="chart-plot" class="chart-plot"></div>
+      <div id="chart-plot" class="chart-plot" tabindex="0" aria-label="Usage history. Drag, or use the arrow keys, to move through the last seven days; Home and End jump to the oldest sample and to now."></div>
     </section>
   </main>
   <footer>Plain HTML/CSS/JS · data fetched from the local server every 60s.</footer>

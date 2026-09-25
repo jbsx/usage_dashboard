@@ -122,6 +122,16 @@ h1 { font-size: 17px; margin: 0; font-weight: 600; }
 .chart-head p { color: var(--muted); font-size: 11px; margin: 2px 0 0; }
 .live-mark { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; display: flex; align-items: center; gap: 6px; }
 .live-mark i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px color-mix(in srgb, var(--green) 70%, transparent); }
+/* Paused rather than live: the dot goes grey while the view is anchored in the past. */
+.live-mark.browsing i { background: var(--muted); box-shadow: none; }
+.chart-nav { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.chart-nav button {
+  background: var(--card-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; min-width: 30px; padding: 3px 9px; cursor: pointer; font-size: 13px; line-height: 1.2;
+}
+.chart-nav button:hover:not(:disabled) { border-color: var(--accent); }
+.chart-nav button:disabled { opacity: .35; cursor: default; }
+.chart-nav .live-mark { margin-left: 4px; }
 .chart-legend { display: flex; flex-wrap: wrap; gap: 5px 14px; margin: 10px 0 6px; flex: 0 0 auto; }
 .series-toggle { display: flex; align-items: center; gap: 6px; color: var(--muted); cursor: pointer; font-size: 11px; }
 .series-toggle input { position: absolute; opacity: 0; pointer-events: none; }
@@ -129,7 +139,11 @@ h1 { font-size: 17px; margin: 0; font-weight: 600; }
 .series-toggle:has(input:checked) { color: var(--text); }
 .series-toggle:has(input:checked) i { background: var(--series); box-shadow: 0 0 6px color-mix(in srgb, var(--series) 55%, transparent); }
 .series-toggle:focus-within { outline: 1px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
-.chart-plot { flex: 1 1 auto; min-height: 0; }
+/* Horizontal drags pan the history; pan-y hands vertical ones to the page so
+   a phone still scrolls past the chart. */
+.chart-plot { flex: 1 1 auto; min-height: 0; touch-action: pan-y; cursor: grab; user-select: none; -webkit-user-select: none; }
+.chart-plot.dragging { cursor: grabbing; }
+.chart-plot:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
 .chart-plot svg { display: block; width: 100%; height: 100%; overflow: visible; }
 .chart-grid line { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .chart-grid text { fill: var(--muted); font: 12px Inter, sans-serif; }
@@ -280,6 +294,7 @@ footer { display: none; }
   .extra { font-size: 11px; }
   /* Whatever the cards leave, but never so little that the plot is a sliver. */
   #usage-chart { flex: 1 1 auto; min-height: 240px; padding: 10px; }
+  .chart-head { flex-wrap: wrap; gap: 8px; }
   .chart-legend { margin: 8px 0 4px 4px; }
   .chart-plot { min-height: 160px; }
   .chart-grid text { font-size: 11px; }

@@ -11,7 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { demoSnapshot } from "./demo-data.mjs";
+import { demoHistory, demoSnapshot } from "./demo-data.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const arg = (name, fallback) => {
@@ -50,6 +50,14 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/api/usage") {
     res.writeHead(200, { "content-type": "application/json" });
     return res.end(JSON.stringify(demoSnapshot(Date.now())));
+  }
+  if (url.pathname === "/api/history") {
+    const from = Number(url.searchParams.get("from"));
+    const to = Number(url.searchParams.get("to"));
+    const week = demoHistory(Date.now());
+    const samples = week.filter((sample) => sample.sampledAt >= from && sample.sampledAt <= to);
+    res.writeHead(200, { "content-type": "application/json" });
+    return res.end(JSON.stringify({ samples, oldestAt: week[0].sampledAt }));
   }
   if (url.pathname === "/api/history/import" || url.pathname === "/api/autoarm") {
     res.writeHead(200, { "content-type": "application/json" });

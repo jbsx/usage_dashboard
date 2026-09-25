@@ -1,8 +1,12 @@
 // Demo payload for the README screenshot: the real /api/usage shape, filled
-// with representative numbers and an unbroken 24 hours of samples. Nothing
+// with representative numbers and an unbroken seven days of samples. Nothing
 // here reads or writes the live dashboard's own history.
 const HOUR = 3600e3;
-const SPAN = 24 * HOUR;
+const DAY = 24 * HOUR;
+const SPAN = 7 * DAY;
+// Mirrors the server: the snapshot embeds the last 13 hours, the rest is
+// served by /api/history.
+const EMBED_MS = 13 * HOUR;
 const SAMPLE_MS = 2 * 60e3;
 const FIVE_H = 5 * HOUR;
 
@@ -13,11 +17,11 @@ const elapsed = (age) => SPAN - age;
 const rand = (n) => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
 const wobble = (t, seed) => Math.sin(t * 37 + seed) * 0.4 + Math.sin(t * 11.3 + seed * 2) * 0.55;
 
-// Nobody codes around the clock: the window opens busy, goes quiet overnight,
-// then picks up again. Every series is shaped by this so the chart reads like a
-// day of work rather than a signal generator.
+// Nobody codes around the clock: each day opens busy, goes quiet overnight,
+// then picks up again. Every series is shaped by this so the chart reads like
+// days of work rather than a signal generator.
 const activity = (u) => {
-  const h = u / HOUR;
+  const h = (u % DAY) / HOUR;
   if (h < 4.5) return 1.15;
   if (h < 6) return 0.5;
   if (h < 11.5) return 0.04;
@@ -26,7 +30,7 @@ const activity = (u) => {
 };
 // Share of the day's work done by time u — the integral of activity, normalised.
 const workDone = (() => {
-  const steps = 480;
+  const steps = 7 * 480;
   const cum = [0];
   for (let i = 1; i <= steps; i++) cum.push(cum[i - 1] + activity((i / steps) * SPAN));
   const total = cum[steps];
@@ -56,7 +60,7 @@ const ramp = (age, from, to, seed) => {
   return Math.max(0, Math.round((value + wobble(u / SPAN, seed) * 0.35) * 10) / 10);
 };
 
-export function demoSnapshot(now) {
+function demo(now) {
   const byProvider = (age) => ({
     GLM: [
       { key: "monthly", label: "Monthly (tool calls)", usedPct: ramp(age, 27, 34, 1) },
@@ -108,5 +112,19 @@ export function demoSnapshot(now) {
     extras: p.name === "Claude" ? [{ label: "Spend", text: "18.40 GBP (37% of cap)" }] : [],
   }));
 
-  return { updatedAt: now, providers, history };
+  return { providers, history };
+}
+
+// The full week, for the screenshot server's /api/history.
+export const demoHistory = (now) => demo(now).history;
+
+export function demoSnapshot(now) {
+  const { providers, history } = demo(now);
+  return {
+    updatedAt: now,
+    providers,
+    history: history.filter((sample) => sample.sampledAt >= now - EMBED_MS),
+    historySince: now - EMBED_MS,
+    historyOldestAt: history[0].sampledAt,
+  };
 }

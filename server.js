@@ -557,6 +557,17 @@ const historySampler = createUsageSampler({
   onError: (e) => console.error("[history] background sample failed:", e.message),
 });
 
+// The snapshot carries only the chart's live view plus an hour of margin
+// for the curve and gap detection; the page asks /api/history for anything
+// older when the user scrolls back. Seven days in every 60s poll would be
+// megabytes per tab per minute.
+const HISTORY_EMBED_MS = 13 * 3600e3;
+function recentHistory() {
+  const now = Date.now();
+  const since = now - HISTORY_EMBED_MS;
+  return { history: usageHistory.range(since, now), historySince: since, historyOldestAt: usageHistory.oldestAt() };
+}
+
 function getUsage() {
   if (usageCache.data && Date.now() - usageCache.at < USAGE_TTL_MS) return Promise.resolve(liveUsage(usageCache.data));
   if (usageFetch && usageFetchGen === credGeneration) return usageFetch;
@@ -570,7 +581,8 @@ function getUsage() {
     if (GROK_ENABLED) tasks.push(getCachedGrok());
     if (CLAUDE_ENABLED) tasks.push(claudeScheduler.checkNow());
     const providers = await Promise.all(tasks);
-    const snapshot = { updatedAt: Date.now(), providers, history: usageHistory.record(providers) };
+    usageHistory.record(providers);
+    const snapshot = { updatedAt: Date.now(), providers, ...recentHistory() };
     if (gen === credGeneration) usageCache = { data: snapshot, at: Date.now() };
     return liveUsage(snapshot);
   })();
@@ -644,12 +656,23 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify(data));
       return;
     }
+    if (url.pathname === "/api/history" && req.method === "GET") {
+      try {
+        const answer = usageHistory.query({ from: url.searchParams.get("from"), to: url.searchParams.get("to") });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(answer));
+      } catch (e) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
     if (url.pathname === "/api/history/import" && req.method === "POST") {
       try {
         const { samples } = await readJsonBody(req, 2 * 1024 * 1024);
         if (!Array.isArray(samples)) throw new Error("samples must be an array");
         const history = usageHistory.importSamples(samples);
-        if (usageCache.data) usageCache.data.history = history;
+        if (usageCache.data) Object.assign(usageCache.data, recentHistory());
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ count: history.length }));
       } catch (e) {
